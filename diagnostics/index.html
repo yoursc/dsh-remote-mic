@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ATVV 接缝诊断页 · dsh-remote-mic</title>
+<style>
+  :root {
+    --bg: #faf9f7;
+    --card: #ffffff;
+    --line: #e2e0da;
+    --text: #2c2c2a;
+    --muted: #5f5e5a;
+    --ok: #3b6d11;
+    --warn: #854f0b;
+    --bad: #a32d2d;
+    --live: #185fa5;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px; background: var(--bg); color: var(--text);
+    font: 14px/1.6 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  }
+  h1 { font-size: 18px; font-weight: 500; margin: 0 0 4px; }
+  h2 { font-size: 14px; font-weight: 500; margin: 0 0 10px; color: var(--muted); }
+  .sub { color: var(--muted); font-size: 13px; margin: 0 0 20px; }
+  section {
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    padding: 16px; margin-bottom: 14px;
+  }
+  .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  button {
+    font: inherit; padding: 7px 14px; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--line); background: #fff; color: var(--text);
+  }
+  button:hover:not(:disabled) { border-color: var(--muted); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.primary { background: #185fa5; border-color: #185fa5; color: #fff; }
+  .pill {
+    display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 12px;
+    border: 1px solid var(--line); background: #f1efe8; color: var(--muted);
+  }
+  .pill.ok { background: #eaf3de; border-color: #97c459; color: var(--ok); }
+  .pill.bad { background: #fcebeb; border-color: #f09595; color: var(--bad); }
+  .pill.live { background: #e6f1fb; border-color: #85b7eb; color: var(--live); }
+  .kv { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px 16px; }
+  .kv div { border-left: 2px solid var(--line); padding-left: 8px; }
+  .kv span { color: var(--muted); font-size: 12px; display: block; }
+  .kv b { font-weight: 500; font-variant-numeric: tabular-nums; }
+  code, .mono { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 12px; }
+  .scroll { max-height: 200px; overflow: auto; }
+  #msg-log .msg-row {
+    display: grid; grid-template-columns: 76px 62px 1fr; gap: 8px;
+    padding: 3px 0; border-bottom: 1px dashed var(--line); font-variant-numeric: tabular-nums;
+  }
+  #msg-log .op { color: var(--live); font-weight: 500; }
+  #msg-log .hex { color: var(--muted); word-break: break-all; }
+  #log .log-row { padding: 2px 0; white-space: pre-wrap; }
+  #log .err { color: var(--bad); }
+  #log .warn { color: var(--warn); }
+  #log .good { color: var(--ok); }
+  audio { width: 100%; margin-top: 10px; }
+  label { display: inline-flex; align-items: center; gap: 8px; }
+  input[type=range] { width: 170px; }
+  .note {
+    background: #faeeda; border: 1px solid #ef9f27; color: #633806;
+    border-radius: 8px; padding: 10px 12px; font-size: 13px; margin-bottom: 14px;
+  }
+</style>
+</head>
+<body>
+
+<h1>ATVV 接缝诊断页</h1>
+<p class="sub">
+  proto 1 接缝观察器。音频只有一条来路：遥控器 → local-mic → 本页（WebSocket）。
+  本页因此也只做三件事：显示接缝消息、试听录到的音频、在线跑一遍协议契约。
+</p>
+
+<div class="note">
+  ⚠ <strong>遥控器的录音键在 Windows 上就是 F5（浏览器刷新键）</strong>——按下会刷新页面、断开连接。
+  下面这个开关拦住它。<strong>你自己要刷新请按 Ctrl+F5</strong>（带修饰键不拦）。<br>
+  <label style="margin-top:8px">
+    <input id="block-refresh" type="checkbox" checked>
+    屏蔽录音键触发的刷新
+  </label>
+</div>
+
+<section>
+  <h2>连接 local-mic</h2>
+  <div class="row">
+    <input id="ws-url" value="ws://127.0.0.1:8787" size="26" class="mono">
+    <button id="btn-local-mic" class="primary">连接</button>
+    <button id="btn-disconnect" disabled>断开</button>
+    <span id="proto-pill" class="pill">proto —</span>
+    <span id="state-pill" class="pill">idle</span>
+  </div>
+  <div class="row" style="margin-top:10px">
+    <span class="mono">设备：<b id="dev-name">—</b></span>
+  </div>
+  <div class="row" style="margin-top:4px">
+    <code id="dev-detail" style="color:var(--muted)">—</code>
+  </div>
+  <div class="row" style="margin-top:6px">
+    <span class="mono" style="color:var(--muted)">ready：</span>
+    <code id="ready-detail" style="color:var(--muted)">—</code>
+  </div>
+  <div class="note" style="margin-top:12px; margin-bottom:0">
+    端口在 local-mic 主窗口底部可改（默认 8787）。此处填过的地址会被记住，下次自动填回。
+  </div>
+</section>
+
+<section>
+  <h2>接缝消息（local-mic → 客户端，原样）</h2>
+  <div class="scroll" id="msg-log"></div>
+</section>
+
+<section>
+  <h2>采集与音频</h2>
+  <div class="kv">
+    <div><span>帧数</span><b id="st-frames">0</b></div>
+    <div><span>总字节</span><b id="st-bytes">0</b></div>
+    <div><span>PCM 样本</span><b id="st-samples">0</b></div>
+    <div><span>采集窗口</span><b id="st-dur">0 ms</b></div>
+    <div><span>帧流连续率</span><b id="st-rate">—</b></div>
+    <div><span>帧流中断</span><b id="st-gap">—</b></div>
+    <div><span>RMS</span><b id="st-rms">—</b></div>
+    <div><span>峰值</span><b id="st-peak">—</b></div>
+    <div><span>削波</span><b id="st-clip">0</b></div>
+  </div>
+
+  <div class="row" style="margin-top:14px">
+    <label>
+      <span class="mono">增益</span>
+      <!-- 默认 1×（不放大）：PCM 直接来自 local-mic，电平本就不低；
+           早期那个 ×5 是按"试听归一到 −18 dBFS"定的经验值，实测会让 99% 样本削波。 -->
+      <input id="gain" type="range" min="1" max="12" step="0.5" value="1">
+      <b id="gain-val" class="mono">1×</b>
+    </label>
+    <button id="btn-replay">重新载入播放器</button>
+    <button id="btn-wav">下载 WAV</button>
+  </div>
+  <audio id="audio" controls></audio>
+  <div class="row" style="margin-top:8px">
+    <span class="mono" style="color:var(--muted)">松手后 WAV 会自动载入上面的播放器，直接点播放即可。</span>
+  </div>
+</section>
+
+<section>
+  <h2>协议自测（对真 local-mic 发消息，看它怎么处置）</h2>
+  <div class="row">
+    <button id="btn-probe" disabled>跑一遍 C→L 契约</button>
+    <button id="btn-probe-bad" disabled>测 proto 不匹配（会断开连接）</button>
+    <span id="probe-result" class="pill">未跑</span>
+  </div>
+  <div class="note" style="margin-top:12px; margin-bottom:0">
+    离线夹具（<code>test/l2-protocol.test.mjs</code>）测的是<strong>客户端</strong>怎么处置 local-mic 消息；
+    这里反过来，测 <strong>真 local-mic</strong> 怎么处置客户端消息 —— 两端各跑一遍，缝才算守住。<br>
+    覆盖：<code>hello</code> ⇒ <code>ready</code>、已删除的 <code>write</code> ⇒ <code>op_not_supported</code>（连接须保持）、
+    真未知 op 静默忽略、<code>audio</code> 订阅开关。
+    proto 不匹配与二进制帧格式属负例，在离线夹具里（L2 24 条 / C# 19 条）。
+  </div>
+</section>
+
+<section>
+  <h2>日志</h2>
+  <div class="scroll mono" id="log"></div>
+</section>
+
+<script type="module" src="./js/app.js"></script>
+</body>
+</html>

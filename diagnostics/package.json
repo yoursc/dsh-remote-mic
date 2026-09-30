@@ -1,0 +1,6 @@
+{
+  "name": "dsh-remote-mic-diagnostics",
+  "private": true,
+  "type": "module",
+  "description": "Step 0 诊断页与 L0 算法测试。type=module 让 Node 能直接跑这些 ES module。"
+}

@@ -1,0 +1,57 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <UseWindowsForms>true</UseWindowsForms>
+    <AssemblyName>local-mic</AssemblyName>
+    <RootNamespace>DshRemoteMic</RootNamespace>
+    <PlatformTarget>x64</PlatformTarget>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+    <Version>0.1.0</Version>
+    <Company>dsh-remote-mic</Company>
+    <Product>DSH remote mic · local-mic</Product>
+    <Description>把小米蓝牙语音遥控器（RC003-MS）的 ATVV 音频经 localhost WebSocket 暴露给 dsh</Description>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+  </PropertyGroup>
+
+  <!--
+    目标机只需 .NET Framework 4.8（Windows 10 1809+ / Windows 11 自带，由 Windows Update 维护）。
+    以下两个包都只在【构建期】起作用，不随产物分发：
+      - Microsoft.NETFramework.ReferenceAssemblies 提供 net48 的引用程序集（本机未装 targeting pack）
+      - Microsoft.Windows.SDK.Contracts         提供 WinRT（Windows.Devices.Bluetooth）的类型投影，
+                                                 并**传递**带入 System.Runtime.WindowsRuntime
+                                                 —— `IAsyncOperation.AsTask()` / IBuffer 扩展方法在这里
+                                                （它自带的 buildTransitive/net461/*.targets 负责接线）
+
+    ⚠ 不要手写 <Reference Include="System.Runtime.WindowsRuntime" />。
+    该程序集不在 ReferenceAssemblies 包里，没装 targeting pack 的机器解析不到它 ⇒ 必然报
+    MSB3245；而它已由上面的包传递提供，重复引用只是噪音（2026-09-30 实测删除后 0 error、
+    产物引用不变，故删）。
+  -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+    <PackageReference Include="Microsoft.Windows.SDK.Contracts" Version="10.0.19041.1" />
+  </ItemGroup>
+
+  <!--
+    共享黄金向量（单一数据源）。嵌成资源而非读文件，
+    是为了发布后（exe 被拷到别处）也能跑自检。
+
+    adpcm-vectors.txt      由 Node 侧解码器生成，C# 逐字节比对防两套解码器漂移
+    protocol-vectors.txt   PROTOCOL.md §14 的消息级夹具，防文档与实现脱钩
+  -->
+  <ItemGroup>
+    <EmbeddedResource Include="..\conformance\adpcm-vectors.txt"
+                      LogicalName="DshRemoteMic.adpcm-vectors.txt" />
+    <EmbeddedResource Include="..\conformance\protocol-vectors.txt"
+                      LogicalName="DshRemoteMic.protocol-vectors.txt" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,378 @@
+# RC003-MS × deepseek-harness 插件：可行性调研
+
+> ## 🔴 这是调研过程稿，不是结论。架构结论请以 [`../AGENTS.md`](../../AGENTS.md) 为准。
+>
+> **2026-09-29 更新**：本文关于「采集侧放在浏览器（Web Bluetooth）」的路线已在真机上判死
+> —— Windows 上未配对报 `ATT 0x05`、已配对则设备不广播而从 `requestDevice()` 选择器消失，两头堵死。
+> 现方案是**本地常驻 helper 做 GATT 桥**（`tools/helper-win/`，C# + .NET Framework 4.8 WinForms 托盘程序），
+> 插件侧经 `ws://127.0.0.1:8787` 取原始帧。详见 AGENTS.md §2.6。
+>
+> 本文中仍然有效的部分：**dsh 插件体系、33 个 seam、语音与审批接入点**。
+
+> 调研时间：2026-09-28　设备：小米蓝牙遥控器 2 Pro（RC003-MS）
+> 目标形态：**dsh 插件**　功能范围：**语音输入 + 审批控制**
+> 本文只做能力边界与接入路径分析，**不含实现代码**
+
+---
+
+> ## ⚠️ 2026-09-28 晚 补充：部署拓扑修正（请先看这段）
+>
+> 本文调研时假设 dsh 跑在本地。实际拓扑是：
+>
+> ```
+> 远程服务器容器 = dsh Host（Agent 运行时 + ASR 模型）
+> 本地电脑       = 只有浏览器打开 dsh Web 端（Client）
+> RC003-MS       = 蓝牙连的是【本地电脑】
+> ```
+>
+> **因此文中"遥控器音频从 Host 侧 BLE 来"的前提不成立。** 修正后的结论：
+>
+> - **音频采集在 Client 侧**，由本地 helper 持有蓝牙并经 `ws://127.0.0.1:8787` 转发
+>   （**2026-09-29 修正**：原先定为"浏览器 Web Bluetooth 直连"，已在真机上判死，见 AGENTS.md §2.6.2）
+> - **转写在 Host 侧**，Client 用 `ctx.remote.speech.transcribe(request, signal)` 调用（源码实证：`client-ui-voice-input/src/client/mount.ts`）
+> - **注入在 Client 侧**，用 `inputActions.insertText(text, span)`
+> - **下文 §6 列的"生死线"（`insertText()` 能否从 Host 调用）因此不复存在**——v1 全程在浏览器/本地完成，只有转写这一步跨到服务器
+> - ~~新增的关键风险换成：Chrome 能否连接已作为 HID 键盘配对的 RC003、Web Bluetooth 下 MTU 不可控、页面 origin 必须 HTTPS~~
+>   **2026-09-29**：这三条**全部作废**——前两条是路径 A 的问题（已判死），第三条随路径 B 一起解除
+>   （`http://IP:端口` 的 dsh 页面连 `ws://localhost` 不算混合内容）。真机实测：MTU 够用（228 帧全 120 字节零丢帧）、吞吐 8000 B/s 正好理论值。
+>
+> 其余协议规格、键位、坑位结论仍然有效。
+
+---
+
+## 零、三个先说在前面的结论
+
+1. **dsh 的插件体系里，`ctx.approval` 和 `ctx.speechToText` 都是 `seam`（可替换接缝）**——你要的两件事，官方都留了明确的替换入口，不需要 hack、不需要 fork。
+2. **ATVV 解码后的音频格式，与 dsh 语音链路要求的输入格式是同一个**：16 kHz / 单声道 / PCM16 WAV。**中间零转换**。这个对齐是意外之喜。
+3. **但审批侧有一个必须先设计的风险**：dsh 的审批是 **fail-closed**——没有可用回答者时请求直接失败。遥控器没电、没连上、超时，**agent 会停下来**。这是把审批交给物理设备带来的新失效模式，必须在设计阶段就做降级。
+
+---
+
+## 一、dsh 的插件体系：33 个可替换的 seam
+
+来源：`docs/capability-seams.zh.md`（60 KB，官方维护的服务依赖图 + 表格）。
+
+所谓 **seam**，就是"可以写插件把自己的实现顶替上去"的能力。全库共 33 个。完整清单：
+
+| seam | 默认提供者 | 与你的关系 |
+|---|---|---|
+| **`ctx.approval`** | `user-approval` | ★★★ **审批控制接入点** |
+| **`ctx.speechToText`** | `experimental-speech-to-text` | ★★★ **语音输入接入点** |
+| `ctx.userQuestions` | `user-questions` | ★★ 另一个交互点（`tool-ask-user` 消费） |
+| `ctx.sessionTelemetry` | `session-telemetry` | ★★ 可用于状态巡视 |
+| `ctx.jobs` | `jobs` | ★ 任务状态 |
+| `ctx.terminals` | `terminal` | ★ 终端控制 |
+| `ctx.subprocess` | `subprocess` | ★ 子进程 |
+| `ctx.shell` | `shell` | ★ |
+| `ctx.commands`（core，非 seam） | `commands` | ★ 注册面向人的命令 |
+| `ctx.sandbox` | `sandbox` | |
+| `ctx.fs` | `fs` | |
+| `ctx.llm` | `llm` | |
+| `ctx.mcpResources` | `mcp-resources` | |
+| `ctx.browserUse` / `ctx.computerUse` | 对应包 | |
+| `ctx.attachments` | `attachment` | |
+| `ctx.credentials` / `ctx.authorization` | 对应包 | |
+| `ctx.sessionPersistence` / `ctx.sessionQuery` / `ctx.storage` | 对应包 | |
+| `ctx.fileReferences` / `ctx.sessionTitle` | 对应包 | |
+| `ctx.skills` | `skill` | |
+| `ctx.subagents` | `subagent` | |
+| `ctx.compaction` | `compaction` | |
+| `ctx.ptcRuntime` | `ptc-runtime` | |
+| `ctx.web` / `ctx.spillStore` / `ctx.lsp` / `ctx.workflowEngine` | 对应包 | |
+| `ctx.directoryPicker` | `host-directory-picker` | |
+| `ctx.deepseekLlmApiExtensions` / `ctx.deepseekAccount` | 对应包 | |
+
+> 消费方关系（来自官方图）：`ctx.approval` → 被 `tools`、`tool-bash`、`acp` 消费。也就是说**所有工具调用、所有 bash 执行**都过这道闸。
+
+---
+
+## 二、审批控制：接入方式与接口规格
+
+### 2.1 机制
+
+来源：`packages/interaction/user-approval/src/types.ts` + `README.zh.md`
+
+审批不是配置项，是**一个 cordis 瀑布式（waterfall）事件**：
+
+```ts
+'approval/request'(
+  this: Scoped<Agent>,
+  req: ApprovalRequestEvent,
+  next: () => Promise<ApprovalOutcome>,
+): Promise<ApprovalOutcome>
+```
+
+**语义（README 原话）**：
+> 应答者是 `approval/request` waterfall 监听器：**返回一个结果即为所负责的 agent 作答**，否则调用 `next()` 委派。
+
+这就是说，你的插件有两种姿态：
+
+| 姿态 | 做法 | 效果 |
+|---|---|---|
+| **认领** | 直接 `return outcome` | 你替这个 agent 做了决定，链条终止 |
+| **委派** | `await next()` | 交给链上的下一个回答者（最终落到默认 UI） |
+
+**Scope 过滤**：`this: Scoped<Agent>`，agent 作用域的监听器只收到该 agent 的请求。所以你可以只对特定 agent 接管，其余照旧走 UI。
+
+### 2.2 请求与结果的数据结构
+
+```ts
+interface ApprovalRequestEvent {
+  readonly agent: Agent
+  readonly toolName: string          // 要执行什么工具
+  readonly callId?: ToolCallId
+  readonly reason?: string           // 人类可读的原因
+  readonly displayReason?: { en: string, [locale: string]: string }
+  readonly signal?: AbortSignal      // 请求的取消生命周期
+}
+
+type ApprovalOutcome =
+  | 'allowed-once'   // 一次性放行
+  | 'rejected'       // 明确拒绝
+  | 'cancelled'      // 请求被撤回
+  | 'unavailable'    // 无回答者 —— 调用方 fail closed
+```
+
+> **`allowed-once`（一次性放行）这个语义，和 OpenAI Codex Micro 那颗 `YOLO` 键帽做的事情完全一致。** 说明这条路是行业共识，不是你想偏了。
+
+### 2.3 审计事件（可用于状态显示）
+
+挂在 Session 事件上，成对出现：
+
+- `approval/asked` — `{ id, toolName, callId?, reason? }`
+- `approval/decided` — `{ id, outcome }`
+
+两者用同一个 `id` 配对，且 **`asked` 必然跟一个 `decided`**。`invariant.ts` 就是专门做这个配对校验的伴随插件。
+
+**这对你的价值**：这两条事件就是"agent 现在是不是在等我按遥控器"的权威信号——不用去猜 UI 状态。做状态指示灯/平板监视器时，直接消费这两个事件即可。
+
+### 2.4 ⚠️ 必须提前设计的风险：fail-closed
+
+README 第 116 行原文：
+
+> Approval policy: ask. Operations that require approval may ask through the configured answerers; **without an available answerer, the request fails closed**.
+
+再加上第 78 行：
+
+> `decide()` 让应答者 waterfall 与请求信号赛跑，并隔离所有应答者故障：**抛出异常的监听器会使问题以 `unavailable` 关闭**。
+
+**翻译成人话**：把审批交给遥控器，等于给系统引入了一个新的失效源。遥控器没电、蓝牙断了、你离开座位、插件崩了——**agent 都会停在审批这一步，不会自己往下走**。
+
+这不是 bug，是 dsh 刻意的安全设计（宁可停，不可乱）。但你的插件必须自己处理：
+
+| 场景 | 建议策略 |
+|---|---|
+| 遥控器未连接 / 无响应 | 超时后 `await next()`，把决定权交回默认 UI |
+| 你在 N 秒内没按键 | 同上，且要考虑"是否默认放行"这个策略开关 |
+| 插件自身异常 | **绝不能抛异常**——一抛就 `unavailable` 直接关闭，必须 catch 后转 `next()` |
+| 蓝牙重连窗口 | 这段时间内不要注册为 answerer，让默认 UI 顶上 |
+
+> 一句提醒：**这条 fail-closed 规则决定了，"超时自动放行"和"超时转回 UI"是这个插件最重要的一个设计决策**，比按键映射重要得多。建议一开始就把超时和降级路径做进去，不要留到最后。
+
+---
+
+## 三、语音输入：接入方式与接口规格
+
+### 3.1 现状：dsh 已经有一套完整的语音输入链路
+
+来源：`docs/subsystems/voice-input.zh.md`、`packages/experimental/speech-to-text/src/types.ts`、两份 README
+
+链路是三个角色：
+
+| 角色 | 包 | 职责 |
+|---|---|---|
+| 服务定义（seam） | `experimental-speech-to-text` | `ctx.speechToText`，路由具名 Provider |
+| Provider | `experimental-speech-to-text-sensevoice` | **SenseVoice** 本地推理（中文友好） |
+| Remote 消费者 | `experimental-api-speech-to-text` | `ctx.speechController`，服务浏览器 |
+| 可选 Bundle | `experimental-voice-input-bundle` | 把三者 + 麦克风 UI 组合起来 |
+
+### 3.2 ⭐ 三个与遥控器高度对齐的设计
+
+**① 音频格式完全一致——零转换**
+
+> `./wave` 辅助函数为 Remote 消费者与原生识别进程校验规范的 **16 kHz 单声道 PCM16 WAV**。
+
+而 ATVV 音频解出来就是：**16 kHz / 单声道 / IMA ADPCM 4bit → 解码为 PCM16**。
+
+**这两者是同一个格式。** 你解码完直接包个 WAV 头就能喂进去，不需要重采样、不需要转声道。
+
+**② 只支持完整录音转写——正好匹配 PTT**
+
+> 仅支持完整录音转写。服务没有流式识别或语音合成方法。
+
+官方明确不做流式。而你的交互模型就是"按住说话、松开出字"的完整录音模式。**语义天然吻合**，不存在阻抗失配。
+
+**③ 音频是临时数据——不污染会话**
+
+> 音频是临时数据，不成为 Session 事件或附件；**只有用户之后的普通提交才记录识别文字**。
+
+### 3.3 完整 API（`ctx.speechToText`）
+
+```ts
+// 注册一个识别器；重复 id 会失败（不会静默替换）
+register(provider: SpeechProvider): () => Promise<void>
+
+listProviders(): readonly SpeechProviderInfo[]
+async *follow(caller: AbortSignal): AsyncIterable<SpeechSnapshot>
+snapshot(): SpeechSnapshot
+async configure(patch: SpeechSelectionPatch): Promise<void>
+prepare(id: SpeechProviderId, options?: SpeechPreparationOptions): void
+async cancelPreparation(id: SpeechProviderId): Promise<void>
+
+resolve(request: SpeechRequest): SpeechSpec          // 应用默认 + 捕获 Provider
+async transcribe(spec: SpeechSpec, signal: AbortSignal): Promise<Transcript>
+```
+
+输入 / 输出：
+
+```ts
+interface SpeechInput { audio: Uint8Array; language: string }   // WAV 字节
+interface Transcript { text: string; audioSeconds: number; inferenceSeconds: number }
+
+interface SpeechProvider {
+  info: SpeechProviderInfo      // location: 'host-local' | 'cloud'
+  preparation?: SpeechPreparation
+  transcribe(input: SpeechInput, signal: AbortSignal): Promise<Transcript>
+}
+```
+
+`ctx.speechController` 是另一套，全部带 `@Remote` 装饰（浏览器远程调用）：`catalog()` / `follow()` / `configure()` / `prepare()` / `cancelPreparation()` / `transcribe()`。
+
+### 3.4 ⚠️ 一个架构障碍：麦克风在浏览器手里
+
+这是本次调研里**对语音方案影响最大的一条**：
+
+> **浏览器拥有麦克风轨道与未发送的草稿。** `TranscriptionRequest` 通过带认证的 Remote 发送规范 base64 PCM16 WAV。
+
+也就是说：现有语音链路的**录音端在 Client（浏览器 UI）**，不在 Host。**你的遥控器音频是从 Host 侧的 BLE GATT 来的**，走不进这条"浏览器录音 → Remote → Host"的管道。
+
+同时，录音限制也是 Remote 侧定义的：`maxAudioBytes` 与 `maxDurationSeconds`。
+
+**因此有两条候选路径，需要二选一（建议先验证可行性再定）：**
+
+| 路径 | 做法 | 优点 | 待验证 |
+|---|---|---|---|
+| **A. Host 侧直调** | 插件自己走 ATVV 取音频 → 解码成 PCM16 → 包 WAV → 直接调 `ctx.speechToText.resolve()+transcribe()` → 用 `InputActions.insertText()` 注入输入框 | 绕开浏览器，链路最短，音频不落地 | `insertText()` 是 Client 侧 API，**Host 侧插件能否调用？** 这是关键未知 |
+| **B. 注册 Provider** | 用 `register()` 注册一个自己的 `SpeechProvider`，但它仍被浏览器录音调用 | 符合官方扩展方式 | 录音源仍是浏览器麦克风，**遥控器音频进不来**——这条路很可能走不通 |
+
+> **判断：大概率只有 A 可行。** 但 A 依赖 `InputActions.insertText()` 的跨侧可用性，这是本次调研**尚未验证的第一个关键未知**，建议下一步优先确认。
+
+关于 `insertText()` 的规格（值得注意的细节）：
+
+> 输入门面在录音前捕获**带版本的选区**。`insertText()` **仅在选区版本仍有效且提交状态允许编辑时**，插入一次可撤销的纯文本编辑。插入被拒绝时，转写文字保留以供显式插入。**切换 Session 或释放插件使迟到结果失效。**
+
+也就是说：注入有版本校验，你按下说话时记录的选区版本，到你松开出字时可能已经失效（比如 agent 已经往下跑了）。**这个延迟失效问题要在设计里考虑**（尤其是长语音 + 本地 ASR 有秒级耗时的情况下）。
+
+---
+
+## 四、硬件能力边界：RC003-MS 在 Windows 上到底能干什么
+
+你选了"先看硬件能力边界"，这一节就是答案。
+
+### 4.1 设备规格（官方）
+
+| 项 | 值 |
+|---|---|
+| 型号 | RC003-MS（小米蓝牙遥控器 2 Pro） |
+| 蓝牙 | **5.4** |
+| 电池 | 300 mAh，USB-C 充电（非干电池） |
+| 麦克风 | 内置 |
+| 特殊硬件 | **NFC 一碰投屏**、**一颗可自定义键**（TV 键） |
+| 价格 | ¥99 |
+
+> 那颗**可自定义键**值得单独一提：它是白捡的额外输入源。海外评测称其为 programmable key。在你的方案里，它是第 8 个可用键。
+
+### 4.2 按键能力（Windows，RC003 真机取证）
+
+| 按键 | usage | Windows 可用性 |
+|---|---|---|
+| 语音键 | F5 (0x74) | ✅ 驱动 ATVV 会话 |
+| 确认 | `0x0028` → VK_RETURN | ✅ |
+| 主页 | `0x004A` → VK_HOME | ✅（会连带影响实体键盘 Home） |
+| 方向键 ×4 | 标准方向键 | ✅ |
+| 电源键 | `vk=0xFF / scan=0x5E` | ✅ 唯一非标存活键 |
+| **返回** | `0x00F1` | ❌ Windows 侧零事件 |
+| **音量 +** | `0x0080` | ❌ Windows 侧零事件 |
+| **音量 −** | `0x0081` | ❌ Windows 侧零事件 |
+
+### 4.3 三键失效的真正根因（已实测闭合，不是推测）
+
+```
+设备确实上报（HidP_GetButtonCaps 取证：0x80/0x81/0xF1 确实在报告里）
+    ↓  报告到达 WUDFHost.exe（提权只读实测，30 次命中：三键各 3 次）
+    ↓
+Windows 事件层零事件（Raw Input 采集对照组）
+    ⇒ 丢弃发生在 HID→VK 键码映射阶段（kbdhid）
+```
+
+**不是设备不上报，是 Windows 的 HID→VK 映射表里没有这三个 usage。**
+
+**免提权的四条路全部实测 failed**（别再自己试一遍了）：
+
+| 通道 | 结果 |
+|---|---|
+| 用户态 `CreateFile(GENERIC_READ)` 直读 TLC | `err=5` |
+| 厂商 GATT 服务 `8A7A0001` 的 3 个通知特征 | 可订阅但零通知 |
+| GATT HID 服务 `0x1812` 特征枚举 | 全部 AccessDenied |
+| Raw Input 注册 5 种组合 | 三键零事件（同采集内确定键/主页键精确到达，自证对照有效） |
+
+**唯一走通的路**：注入 `WUDFHost.exe`（用户态驱动宿主），拦截 `DeviceIoControl` / `IOCTL 0x80018483`，在 `onEnter` 改写 usage。需一次 UAC 提权，但**不装内核驱动、不开 TESTSIGNING、不关 Secure Boot、不重启**。实测 7/7 PASS。
+
+> **MVP 阶段建议不要碰这条路**，代价和风险都高一个量级。先用电源键 + 双击/长按语义层凑合。
+
+### 4.4 语音通道（ATVV）的两个硬约束
+
+**① 固件免费音频窗口只有约 5.7 秒**
+
+超过就被精确掐断。必须每 **2.5 秒**发一次 `0x0E <session_id>`（MicrophoneExtend）续期，StreamStarted 排期、StreamStopped 取消。**你说 prompt 一句话轻松超过 5.7 秒，这个坑是必然踩到的。**
+
+（顺带修正：早前资料里的"60 秒上限"是错的，实际是 5.7 秒。）
+
+**② 首次配对只有 55% 链路送达率**
+
+实测：按住 17.55 s 只到达 638 帧（音频 9.57 s）。**删掉配对重新配对后恢复到 98.7%**。这是配对态问题不是硬件缺陷，但**必须开箱就做**，否则你会把它误判成"我的代码有 bug"。
+
+验证公式：`到达帧数 × 15 ms ÷ 按住时长 = 实时送达率`（120 字节 ADPCM 帧 = 240 samples = 15 ms @16 kHz）。
+
+**③ 一个 Windows 专属坑**：一个设备同时只能有一个 GATT 客户端，调试时**不能开两个程序连同一个遥控器**。
+
+---
+
+## 五、两个能力 × 两条接入路径：对接矩阵
+
+| | 审批控制 | 语音输入 |
+|---|---|---|
+| **dsh 接入点** | `ctx.approval`（seam） | `ctx.speechToText`（seam） |
+| **接入方式** | 监听 `approval/request` waterfall | `resolve()` + `transcribe()`，或 `register()` |
+| **遥控器输入** | 确认键 / 电源键（MVP） | 语音键（F5）→ ATVV |
+| **数据格式** | `ApprovalOutcome` 四值 | 16 kHz mono PCM16 WAV（**与 ATVV 解码输出一致**） |
+| **成熟度** | 官方稳定机制，有 invariant 校验 | **实验性**（包名带 `experimental`） |
+| **主要风险** | **fail-closed**：设备不可用则 agent 停住 | **麦克风在浏览器侧**，Host 侧注入路径待验证 |
+| **MVP 可行性** | 高 | 中（取决于 `insertText()` 跨侧可用性） |
+
+---
+
+## 六、未决问题（下一步调研要解决的）
+
+按重要性排序：
+
+1. **`InputActions.insertText()` 能否从 Host 侧插件调用？** —— 这是语音方案 A 的生死线。如果不行，得改走 Remote 或另找注入通道。
+2. **`maxDurationSeconds` 上限是多少？** —— 关系到 ATVV 的 2.5 s 续期策略要不要跟着调整。
+3. **遥控器音频走 A 路径时，选区版本失效问题怎么处理？** —— 本地 ASR 有秒级耗时，松开到出字之间 agent 可能已经推进。
+4. **审批的超时/降级策略** —— 见 §2.4，这是设计决策不是技术问题，越早定越好。
+5. **实验性包的稳定性** —— `experimental-*` 前缀意味着 API 可能变，要不要基于它做长期方案。
+6. **`ctx.userQuestions` 是否也要接管？** —— `tool-ask-user` 是另一个需要人回答的点，不接管的话你还是得回键盘。
+
+---
+
+## 七、建议的下一步
+
+**先把 §6 的第 1 条验证掉**，因为它决定语音方案能不能成立。
+
+具体做法：读 `packages/experimental/api-speech-to-text/src/index.ts`（4.6 KB）和 Client 侧的输入门面代码，确认 `insertText()` 属于 Host 还是 Client、有没有 Host 侧的注入通道。
+
+这个答案出来之后，整个方案的可行性就是确定的了，再谈设计。
+
+---
+
+*资料来源：deepseek-harness `master` 分支（`docs/capability-seams.zh.md`、`docs/subsystems/voice-input.zh.md`、`packages/interaction/user-approval/src/types.ts` 及其 README、`packages/experimental/speech-to-text/src/types.ts` 及其 README、`packages/experimental/api-speech-to-text/README.zh.md`）；RC003 硬件结论来自 `getsayall/remote-mic-app-windows` 的 `hardware/RC003/` 真机取证资料。仓库状态经 GitHub API 核实于 2026-09-28。*

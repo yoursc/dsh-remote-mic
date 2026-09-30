@@ -1,0 +1,22 @@
+# 行尾策略（显式声明，覆盖各人机器上的 core.autocrlf）
+#
+# 仓库以 LF 为唯一真源：文档、C#/JS/TS 源码、夹具、配置一律 LF。
+# 这样 Windows 上 checkout 不会把整仓文件改写成 CRLF（此前 autocrlf=true 时每次 add 都刷警告）。
+* text=auto eol=lf
+
+# 例外：Windows 批处理必须 CRLF（cmd.exe 对 LF 行尾的 .bat 有已知陷阱）
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 二进制：禁止任何行尾转换
+*.exe binary
+*.dll binary
+*.pdb binary
+*.wav binary
+*.bin binary
+*.png binary
+*.ico binary
+*.jpg binary
+*.docx binary
+*.xlsx binary
+*.pptx binary
