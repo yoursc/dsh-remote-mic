@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
 namespace DshRemoteMic
@@ -18,6 +19,7 @@ namespace DshRemoteMic
         private readonly LocalMic _localMic;
         private NotifyIcon _icon;
         private ContextMenuStrip _menu;
+        private TaskbarWatcher _watcher;
         private ToolStripMenuItem _mStatus;
         private ToolStripMenuItem _mDevice;
         private ToolStripMenuItem _mBattery;
@@ -50,6 +52,16 @@ namespace DshRemoteMic
             _icon.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left) ShowBalloon(); };
             _icon.DoubleClick += (s, e) => ShowMain();
 
+            // 任务栏重建时图标必须重新注册：explorer 崩溃重启、或我们开机自启时抢在 explorer 前面
+            // 起来，NIM_ADD 都会打在"还没有任务栏"的空处，之后图标就再也不会出现了 ——
+            // 而进程活着、WS 在听，用户只会觉得"托盘里没有"。收到 TaskbarCreated 就补一次。
+            _watcher = new TaskbarWatcher();
+            _watcher.TaskbarCreated += () =>
+            {
+                try { _icon.Visible = false; _icon.Visible = true; } catch { }
+            };
+            _watcher.Start();
+
             SafeRefresh();
         }
 
@@ -75,8 +87,10 @@ namespace DshRemoteMic
                 });
             };
 
+            // 诊断页由 local-mic 自己提供，与 WS **共用一个端口**（见 DiagWeb）——
+            // 不再依赖外部另起的静态服务：那要多一个进程、多一个端口，且没人负责它活着。
             var mDiag = new ToolStripMenuItem("打开浏览器诊断页");
-            mDiag.Click += (s, e) => Shell.OpenUrl("http://localhost:8000");
+            mDiag.Click += (s, e) => Shell.OpenUrl(DiagWeb.Url(_localMic.Port));
 
             var mAuto = new ToolStripMenuItem("开机自启") { CheckOnClick = true, Checked = Config.AutoStart };
             mAuto.CheckedChanged += (s, e) => Config.AutoStart = mAuto.Checked;
@@ -105,6 +119,21 @@ namespace DshRemoteMic
                 _form.WindowState = FormWindowState.Normal;
             _form.Activate();
             _form.BringToFront();
+        }
+
+        /// <summary>
+        /// 拿不到托盘图标时的兜底：直接把主窗口开出来，并让"关闭窗口"等于退出程序。
+        ///
+        /// 为什么要改关闭语义：正常模式下关窗只隐藏（程序常驻托盘），但这条路上**没有托盘图标** ——
+        /// 再隐藏就变成一个既没有图标、也没有窗口、只能去任务管理器杀的隐形进程。
+        /// </summary>
+        public void RunWithoutTray(string reason)
+        {
+            ShowMain();
+            if (_form == null) return;
+            _form.CloseExitsApp = true;
+            _form.AppendTitleNote(reason);
+            _form.FormClosed += (s, e) => ExitThread();
         }
 
         private void OnLowBattery(int level)
@@ -182,6 +211,45 @@ namespace DshRemoteMic
             }
         }
 
+        /// <summary>
+        /// 只消息窗口，唯一职责是接收 <c>TaskbarCreated</c>（任务栏/资源管理器重建时由系统广播）。
+        /// 没有它，程序在 explorer 之前启动就永远补不回图标。
+        /// </summary>
+        private sealed class TaskbarWatcher : NativeWindow
+        {
+            private static readonly int MsgTaskbarCreated = RegisterWindowMessage("TaskbarCreated");
+
+            public event Action TaskbarCreated;
+
+            public void Start()
+            {
+                CreateHandle(new CreateParams
+                {
+                    Caption = "local-mic taskbar watcher",
+                    Style = 0,
+                    ExStyle = 0x00000080,       // WS_EX_TOOLWINDOW
+                });
+            }
+
+            public void Stop()
+            {
+                try { DestroyHandle(); } catch { }
+            }
+
+            protected override void WndProc(ref Message m)
+            {
+                if (m.Msg == MsgTaskbarCreated && MsgTaskbarCreated != 0)
+                {
+                    var h = TaskbarCreated;
+                    if (h != null) h();
+                }
+                base.WndProc(ref m);
+            }
+
+            [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+            private static extern int RegisterWindowMessage(string lpString);
+        }
+
         private static Icon MakeIcon(Color c)
         {
             var bmp = new Bitmap(32, 32);
@@ -201,6 +269,7 @@ namespace DshRemoteMic
         private void Exit()
         {
             try { if (_form != null && !_form.IsDisposed) { _form.Dispose(); _form = null; } } catch { }
+            try { if (_watcher != null) _watcher.Stop(); } catch { }
             try { _icon.Visible = false; } catch { }
             try { _localMic.Dispose(); } catch { }
             try { _icon.Dispose(); } catch { }

@@ -87,6 +87,7 @@ namespace DshRemoteMic
         {
             Text = "DSH 遥控麦克风 local-mic";
             FormBorderStyle = FormBorderStyle.FixedSingle;
+
             MaximizeBox = false;
             StartPosition = FormStartPosition.CenterScreen;
             ClientSize = new Size(444, 534);
@@ -274,8 +275,13 @@ namespace DshRemoteMic
             {
                 string dir = DebugLog.Close();
                 RefreshDebugButton();
-                if (dir != null) _testHint.Text = "调试日志已存到：" + dir;
-                Shell.OpenFolder(dir);          // 收尾后 report.txt 已写好，这时打开才有东西看
+                if (dir != null)
+                {
+                    // 收尾后 report.txt 已写好，这时打开才有东西看。
+                    // 低完整性下打不开 explorer（见 Shell.OpenFolder 注释），退化为只显示路径。
+                    bool folderOpened = Shell.OpenFolder(dir);
+                    _testHint.Text = "调试日志已存到：" + dir + (folderOpened ? "" : "（自动打开失败，请手动前往）");
+                }
                 return;
             }
 
@@ -619,10 +625,21 @@ namespace DshRemoteMic
 
         // ------------------------------------------------------------------
 
-        /// <summary>点关闭只隐藏 —— 程序要继续在托盘里常驻，真正退出走托盘的「退出」。</summary>
+        /// <summary>
+        /// true = 关闭窗口即退出程序。只在"拿不到托盘图标"的低完整性模式下设（见 <c>TrayApp.RunWithoutTray</c>）；
+        /// 正常模式下关闭只隐藏 —— 程序要继续在托盘里常驻，真正退出走托盘的「退出」。
+        /// </summary>
+        public bool CloseExitsApp { get; set; }
+
+        /// <summary>在标题后追加一句说明（低完整性无托盘时用）。</summary>
+        public void AppendTitleNote(string note)
+        {
+            Text = Text + " " + note;
+        }
+
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
-            if (e.CloseReason == CloseReason.UserClosing)
+            if (!CloseExitsApp && e.CloseReason == CloseReason.UserClosing)
             {
                 e.Cancel = true;
                 StopPlay();

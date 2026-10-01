@@ -425,11 +425,11 @@ namespace DshRemoteMic
                 case ClientMsgAction.RejectClose:
                     // §6：明确拒绝，不要「警告后继续」—— 老客户端会把 ADPCM 当 PCM16 解，
                     // 得到白噪声且全程不报错，那是最贵的故障。
+                    //
+                    // ⚠ 必须是 SendThenClose，不能 Send + CloseClient：普通 Send 只入队，
+                    // socket 一关 error 帧就胎死腹中，客户端只会看到 1006 而不知道原因。
                     if (_ws != null)
-                    {
-                        _ws.Send(c, MiniJson.Error(v.ErrorCode, false, ErrorText(v.ErrorCode)));
-                        _ws.CloseClient(c);
-                    }
+                        _ws.SendThenClose(c, MiniJson.Error(v.ErrorCode, false, ErrorText(v.ErrorCode)));
                     return;
 
                 case ClientMsgAction.RejectKeep:

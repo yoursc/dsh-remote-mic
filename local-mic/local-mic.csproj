@@ -54,4 +54,29 @@
                       LogicalName="DshRemoteMic.protocol-vectors.txt" />
   </ItemGroup>
 
+  <!--
+    诊断页的**内嵌兜底**：由 local-mic 自己在 WS 端口上提供，见 src/DiagWeb.cs。
+    运行时策略是「磁盘优先，内嵌兜底」—— 先在 exe 向上几层找仓库里的 diagnostics/，
+    找到就现读现用（改页面刷新浏览器即可，**不用重编译**）；找不到（发布出去的单文件 exe、
+    exe 被拷走）才用这里的资源。逐个文件各自回退，缺哪个用哪个的内嵌版。
+
+    ⚠ 因此内嵌这份是"发布态"，可能与磁盘那份不一致 —— 发布前记得重编译一次，
+       自检的最后一段会打印每个文件实际来自磁盘还是内嵌。
+
+    只内嵌页面真正 import 的文件；js/adpcm.js 与 js/session.js 仅服务离线测试（L0/L1），
+    不在页面加载路径上，不进 exe。
+  -->
+  <ItemGroup>
+    <EmbeddedResource Include="..\diagnostics\index.html"
+                      LogicalName="DshRemoteMic.diag.index.html" />
+    <EmbeddedResource Include="..\diagnostics\js\app.js"
+                      LogicalName="DshRemoteMic.diag.js.app.js" />
+    <EmbeddedResource Include="..\diagnostics\js\transport.js"
+                      LogicalName="DshRemoteMic.diag.js.transport.js" />
+    <EmbeddedResource Include="..\diagnostics\js\wav.js"
+                      LogicalName="DshRemoteMic.diag.js.wav.js" />
+    <EmbeddedResource Include="..\diagnostics\js\atvv-consts.js"
+                      LogicalName="DshRemoteMic.diag.js.atvv-consts.js" />
+  </ItemGroup>
+
 </Project>

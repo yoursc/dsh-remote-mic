@@ -83,7 +83,24 @@ namespace DshRemoteMic
         {
             try
             {
-                if (!await HandshakeAsync(client.Stream).ConfigureAwait(false))
+                string request = await ReadHttpRequestAsync(client.Stream).ConfigureAwait(false);
+                if (request == null)
+                {
+                    client.Close();
+                    return;
+                }
+
+                // 不带 Upgrade ⇒ 不是 WebSocket，交给内置诊断页（**共用同一端口**，见 DiagWeb）。
+                // 这一支必须排在握手之前：浏览器开 http://127.0.0.1:<port>/ 发的是普通 GET，
+                // 若拿它当 WS 处理就会直接断连，页面永远打不开。
+                if (!IsWebSocketUpgrade(request))
+                {
+                    await DiagWeb.ServeAsync(request, client.Stream).ConfigureAwait(false);
+                    client.Close();
+                    return;
+                }
+
+                if (!await HandshakeAsync(client.Stream, request).ConfigureAwait(false))
                 {
                     client.Close();
                     return;
@@ -186,6 +203,25 @@ namespace DshRemoteMic
             client.Enqueue(Frame(0x1, Encoding.UTF8.GetBytes(text)), false);
         }
 
+        /// <summary>
+        /// 把 error 帧**同步写出去**再关闭连接 —— 只给「拒绝并断开」这一条路径用
+        /// （PROTOCOL.md §6：proto 不匹配要先发 <c>error{proto_mismatch}</c> 再关闭）。
+        ///
+        /// ⚠ 不要写成 <c>Send(...)</c> + <c>CloseClient(...)</c>：Send 只把帧放进有界队列，
+        /// 真正的 <c>Stream.Write</c> 在另一个线程的排空任务里（异步，为了避免阻塞 BLE 派发线程）。
+        /// 紧跟着就把 socket 拆掉，error 帧基本没机会落地 —— 2026-10-01 裸 TCP 抓包三次
+        /// 全部只收到 state/device，error 一次都没出网：客户端只看到 WebSocket 1006，
+        /// **永远不知道自己为什么被踢**。§6 的「发 error 再关闭」是硬性顺序，少这一帧等于没执行。
+        ///
+        /// 所以这里照 <see cref="SendRaw"/> 的路子同步写（它就是给「必须即时落到网上」的控制帧用的），
+        /// 写完再关。这是 shutting-down 路径上的最后一次写，不存在阻塞别处的顾虑。
+        /// </summary>
+        public void SendThenClose(WsClient client, string text)
+        {
+            SendRaw(client, Frame(0x1, Encoding.UTF8.GetBytes(text)));
+            client.Close();
+        }
+
         /// <summary>主动断开某个客户端（如 proto 不匹配）。关闭 socket 后读循环会自行清理。</summary>
         public void CloseClient(WsClient client)
         {
@@ -225,22 +261,33 @@ namespace DshRemoteMic
 
         // ---------- 协议细节 ----------
 
-        private static async Task<bool> HandshakeAsync(NetworkStream s)
+        /// <summary>读到 HTTP 头结束（空行）为止。断开 / 超限返回 null。</summary>
+        private static async Task<string> ReadHttpRequestAsync(NetworkStream s)
         {
             var buf = new List<byte>(512);
             var one = new byte[1];
             while (true)
             {
                 int n = await s.ReadAsync(one, 0, 1).ConfigureAwait(false);
-                if (n == 0) return false;
+                if (n == 0) return null;
                 buf.Add(one[0]);
                 int c = buf.Count;
                 if (c >= 4 && buf[c - 4] == '\r' && buf[c - 3] == '\n' && buf[c - 2] == '\r' && buf[c - 1] == '\n')
                     break;
-                if (c > 8192) return false;
+                if (c > 8192) return null;
             }
+            return Encoding.ASCII.GetString(buf.ToArray());
+        }
 
-            var req = Encoding.ASCII.GetString(buf.ToArray());
+        /// <summary>请求是不是 WebSocket 升级。是 ⇒ 走 WS，否 ⇒ 当成内置诊断页的 GET。</summary>
+        private static bool IsWebSocketUpgrade(string request)
+        {
+            return Regex.IsMatch(request, @"^\s*Upgrade\s*:\s*websocket",
+                RegexOptions.Multiline | RegexOptions.IgnoreCase);
+        }
+
+        private static async Task<bool> HandshakeAsync(NetworkStream s, string req)
+        {
             var m = Regex.Match(req, @"Sec-WebSocket-Key:\s*(\S+)", RegexOptions.IgnoreCase);
             if (!m.Success) return false;
 

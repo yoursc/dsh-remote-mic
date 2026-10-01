@@ -25,6 +25,54 @@ const REASON_TEXT = {
   aborted: '被设备掐断或 local-mic 主动终止 —— 之前几秒仍可用',
 }
 
+/**
+ * 浏览器识别。只用来给已知的平台缺陷**提前打招呼**，不做功能分支 ——
+ * 本页没有依赖具体浏览器的能力（Web Bluetooth 那套早就删了）。
+ */
+function detectBrowser() {
+  const ua = navigator.userAgent || ''
+  // Firefox 的 UA 里带 "Firefox/x.y"；Seamonkey/Iceweasel 等衍生品也带，但它们不是我们要提醒的对象
+  if (/Firefox\//.test(ua) && !/SeaMonkey|Iceweasel|IceCat/.test(ua)) return 'firefox'
+  if (/Edg\//.test(ua)) return 'edge'
+  if (/Chrom(e|ium)\//.test(ua)) return 'chrome'
+  if (/Safari\//.test(ua)) return 'safari'
+  return 'other'
+}
+
+/**
+ * 建连慢的时候该说的一句话。
+ *
+ * 为什么要专门判浏览器：2026-10-01 实测，Edge 秒连、Firefox 每次 8 秒左右，
+ * 而 local-mic 那头整条握手只要 5 ms —— 不说清楚，所有人第一反应都是"程序写得慢"。
+ * 根因是 Mozilla Bug 1662694：Firefox 会延迟**发起** localhost 的 WebSocket
+ * （连 socket 都不开），随机最长 45 秒，Chrome/Edge 不复现，至今未修。
+ */
+function slowConnectHint(ms) {
+  const secs = (ms / 1000).toFixed(1)
+  if (detectBrowser() === 'firefox') {
+    return `${secs}s 全耗在浏览器里 —— Firefox 的已知缺陷（Mozilla Bug 1662694）：` +
+      '它会在发起 localhost 的 WebSocket 前随机等待数秒，与 local-mic 无关（服务端握手实测 5 ms）。' +
+      '换 Edge / Chrome 打开本页可秒连。'
+  }
+  return `${secs}s 全耗在浏览器里 —— local-mic 那头握手只要几毫秒，请检查浏览器代理设置是否拦了 127.0.0.1。`
+}
+
+/** 已知会踩坑的浏览器，开页就提醒一句 —— 比等用户来问"为什么这么慢"便宜得多。 */
+function installBrowserNote() {
+  if (detectBrowser() !== 'firefox') return
+  const first = document.querySelector('.note')
+  if (!first) return
+  const note = document.createElement('div')
+  note.className = 'note'
+  note.innerHTML =
+    '⚠ 检测到 <strong>Firefox</strong> —— 它会在建立 localhost 的 WebSocket 前随机等待数秒' +
+    '（Mozilla <a href="https://bugzilla.mozilla.org/1662694" target="_blank" rel="noopener">Bug 1662694</a>，' +
+    '2020 年至今未修；Chrome / Edge 不复现）。<br>' +
+    '<strong>这不是 local-mic 慢</strong>：服务端整条握手实测 5 ms。追求秒连请用 Edge 或 Chrome 打开本页；' +
+    '继续用 Firefox 的话，别留着失败的连接（连一个没监听的端口失败会拖住之后所有 localhost 的 WebSocket）。'
+  first.after(note)
+}
+
 const state = {
   transport: null,
   pcmChunks: [],
@@ -162,11 +210,22 @@ const URL_KEY = 'dsh-remote-mic.wsUrl'
 
 function installPortMemory() {
   const input = $('ws-url')
+
+  let saved = null
   try {
-    const saved = localStorage.getItem(URL_KEY)
-    if (saved) input.value = saved
+    saved = localStorage.getItem(URL_KEY)
   } catch {
     /* 忽略 */
+  }
+  if (saved) {
+    input.value = saved
+    return
+  }
+
+  // 本页由 local-mic 自己提供，与 WebSocket **共用一个端口** ⇒ 接缝地址就是本页自己的地址。
+  // 这样主窗口里改过的端口（默认 8787，本机是 18787）不用再手填一遍，也不会对不上。
+  if (location.host) {
+    input.value = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host
   }
 }
 
@@ -199,6 +258,20 @@ function feedWaiter(obj) {
 
 /* ---------------- 连接 ---------------- */
 
+/**
+ * 连接相关按钮的**唯一真相源**。open / close / 断开按钮全都改这里，
+ * 不要在各自路径里逐个写 disabled —— 2026-10-01 真机踩过：Firefox 建连拖了 20 秒，
+ * connect() 先被 15 秒超时判死（走 catch 把「连接」恢复可用），随后 socket 迟到地
+ * 连上、ready 照常到，接缝状态打出了 connected，但"await 成功"那条更新按钮的
+ * 路径永远不会执行 ⇒ 状态与按钮各说各话。改成由 onOpen/onClose 驱动就没有这缝。
+ */
+function setConnUI(connected) {
+  $('btn-local-mic').disabled = connected
+  $('btn-disconnect').disabled = !connected
+  $('btn-probe').disabled = !connected
+  $('btn-probe-bad').disabled = !connected
+}
+
 async function connectLocalMic() {
   const url = $('ws-url').value.trim()
   try {
@@ -206,6 +279,18 @@ async function connectLocalMic() {
   } catch {
     /* 忽略 */
   }
+
+  // 防僵尸连接叠加：被判死的那次尝试 socket 可能还活着（超时/迟到成功都可能），
+  // 再点连接时先把它关掉，否则两个连接同时订阅音频 ⇒ 每帧收两份。
+  const prev = state.transport
+  if (prev?.ws && prev.ws.readyState <= WebSocket.OPEN) {
+    try {
+      prev.disconnect()
+    } catch {
+      /* 忽略 */
+    }
+  }
+
   $('btn-local-mic').disabled = true
 
   try {
@@ -230,10 +315,19 @@ async function connectLocalMic() {
         }
       },
 
+      onOpen(ms) {
+        // 注意：这里的时间是"new WebSocket() → onopen"，**不含** hello→ready。
+        // 慢的只可能是这一段（浏览器自己延后发起连接），服务端那几毫秒根本量不出来。
+        log(`WebSocket 已建立（建连 ${ms} ms）`)
+        if (ms > 1500) log(slowConnectHint(ms), 'warn')
+        // socket 真打开了才算"可断开"。不放在 await 之后：ready 迟到时那条路走不到
+        setConnUI(true)
+      },
+
       onReady(ready) {
         pill('proto-pill', `proto ${ready.proto}`, ready.proto === PROTO ? 'ok' : 'bad')
         setText('ready-detail', JSON.stringify(ready))
-        log(`握手完成：proto=${ready.proto} audio=${ready.audio} caps=${JSON.stringify(ready.caps ?? {})}`, 'good')
+        log(`握手完成：proto=${ready.proto} audio=${JSON.stringify(ready.audio ?? {})} caps=${JSON.stringify(ready.caps ?? {})}`, 'good')
         if (ready.proto !== PROTO) log(`⚠ local-mic 的 proto（${ready.proto}）与本页（${PROTO}）不一致。`, 'warn')
       },
 
@@ -298,20 +392,21 @@ async function connectLocalMic() {
     await transport.connect((e) => {
       log(`连接断开：code=${e?.code ?? '—'} wasClean=${e?.wasClean ?? '—'}`, 'warn')
       pill('state-pill', 'disconnected', 'bad')
-      $('btn-disconnect').disabled = true
-      $('btn-local-mic').disabled = false
-      $('btn-probe').disabled = true
-      $('btn-probe-bad').disabled = true
+      setConnUI(false)
     })
 
-    $('btn-disconnect').disabled = false
-    $('btn-probe').disabled = false
-    $('btn-probe-bad').disabled = false
     log('已连上 local-mic。按住遥控器语音键说话，松手后会自动载入播放器。', 'good')
   } catch (e) {
     log(`连不上 local-mic：${e.message}`, 'err')
     log('确认 local-mic 已在运行（托盘里的 DSH 遥控麦克风），且端口与上面填的一致。', 'warn')
-    $('btn-local-mic').disabled = false
+    // 判死的那次尝试 socket 可能还开着（比如 ready 一直没来）：留着它会继续订阅音频，
+    // 而且稍后若迟到成功还会把状态打回 connected —— 直接关掉，让 onclose 统一收场。
+    try {
+      state.transport?.disconnect()
+    } catch {
+      /* 忽略 */
+    }
+    setConnUI(false)
   }
 }
 
@@ -324,10 +419,7 @@ async function disconnect() {
   stopTicker()
   state.streaming = false
   pill('state-pill', 'disconnected')
-  $('btn-disconnect').disabled = true
-  $('btn-local-mic').disabled = false
-  $('btn-probe').disabled = true
-  $('btn-probe-bad').disabled = true
+  setConnUI(false)
   log('已断开。')
 }
 
@@ -564,6 +656,7 @@ async function probeProtoMismatch() {
 
 /* ---------------- 绑定 ---------------- */
 
+installBrowserNote()
 installPortMemory()
 installBlockRefresh()
 

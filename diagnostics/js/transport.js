@@ -109,35 +109,69 @@ export class WsTransport {
 
   /** 连上并发 hello；resolve 的是 `ready` 消息。 */
   async connect(onDisconnect) {
+    const t0 = Date.now()
     const ws = new WebSocket(this.url)
     ws.binaryType = 'arraybuffer'
     this.ws = ws
 
+    // settle 只认第一次：超时/出错/关闭三条路都会往里写，后到的直接丢弃，
+    // 否则"已成功的连接"还会被迟到的失败改写（反过来也一样）。
+    let settled = false
     let settle
     const ready = new Promise((res, rej) => {
-      settle = { res, rej }
+      settle = {
+        res: (v) => { if (!settled) { settled = true; res(v) } },
+        rej: (e) => { if (!settled) { settled = true; rej(e) } },
+      }
     })
-    const timer = setTimeout(
-      () =>
-        settle.rej(
-          new Error('等待 local-mic 的 ready 超时（15 秒）—— 确认 local-mic 已启动，且端口与这里填的一致'),
-        ),
-      15000,
-    )
 
-    ws.onopen = () => this.sendHello(true)
+    // 🔴 ready 的 15 秒超时必须从 **onopen** 起算，不能从 new WebSocket() 起算。
+    // Firefox 会把"发起连接"本身拖到 20 秒以上（Bug 1662694）：超时若从点击起算，
+    // 会在 socket 打开之前就把 connect() 判死 —— 稍后 socket 照样开、ready 照样到，
+    // 但 await 那条成功路径已经走不到了 ⇒ 接缝状态显示 connected、按钮却停在
+    // "未连接"，两处各说各话（2026-10-01 真机踩过）。
+    let timer = null
+
+    // 建连阶段的陪伴提示：Firefox 拖 20 秒时页面不能一声不吭，让人以为点了没反应
+    const slowOpen = setTimeout(() => {
+      if (ws.readyState === WebSocket.CONNECTING) {
+        const s = ((Date.now() - t0) / 1000).toFixed(0)
+        this.handlers.onWarn?.(
+          `建连已等 ${s} 秒还没连上 —— Firefox 的已知缺陷（Mozilla Bug 1662694），与 local-mic 无关；` +
+            '可以继续等，或换 Edge / Chrome 秒连。'
+        )
+      }
+    }, 3000)
+
+    // 建连耗时必须报出去：Firefox 会延迟发起 localhost 的 WS（Bug 1662694），
+    // 不计时的话这段等待会被算到 local-mic 头上，排查方向直接跑偏。
+    ws.onopen = () => {
+      clearTimeout(slowOpen)
+      this.openMs = Date.now() - t0
+      this.handlers.onOpen?.(this.openMs)
+      timer = setTimeout(
+        () =>
+          settle.rej(
+            new Error('等待 local-mic 的 ready 超时（15 秒）—— local-mic 收到 hello 后一直没回 ready'),
+          ),
+        15000,
+      )
+      this.sendHello(true)
+    }
     ws.onmessage = (e) => {
       if (typeof e.data === 'string') this._onText(e.data, settle, timer)
       else this._onBinary(e.data)
     }
     ws.onclose = (e) => {
       clearTimeout(timer)
+      clearTimeout(slowOpen)
       settle.rej(new Error('local-mic 关闭了连接'))
       // 把 close 的 code / wasClean 交给调用方：正常关闭与异常断开的成因完全不同
       onDisconnect?.(e)
     }
     ws.onerror = () => {
       clearTimeout(timer)
+      clearTimeout(slowOpen)
       settle.rej(new Error(`连不上 ${this.url} —— 确认 local-mic 已启动`))
     }
 

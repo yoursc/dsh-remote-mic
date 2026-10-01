@@ -27,17 +27,29 @@ namespace DshRemoteMic
             }
         }
 
-        /// <summary>在资源管理器里打开目录。调试日志的入口就靠它——不用让用户自己找。</summary>
-        public static void OpenFolder(string dir)
+        /// <summary>
+        /// 在资源管理器里打开目录。返回 false = 没能打开（由调用方决定怎么提示）。
+        /// 调试日志收尾的入口就靠它——不用让用户自己找。
+        /// </summary>
+        public static bool OpenFolder(string dir)
         {
+            if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) return false;
+
+            // ⚠ 低完整性进程拉不起 explorer.exe：子进程继承 Low IL，而 explorer 在 Low IL 下
+            // 初始化直接失败，弹「explorer.exe - 应用程序错误 0xc0000142」。
+            // Process.Start 本身是成功的 —— 崩的是子进程，try/catch 拦不到，
+            // 用户只会看到一个莫名其妙的系统错误框。检测到低完整性就直接不拉，由调用方显示路径。
+            if (Integrity.TrayIconUnavailable) return false;
+
             try
             {
-                if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) return;
                 Process.Start(new ProcessStartInfo("explorer.exe", dir) { UseShellExecute = true });
+                return true;
             }
             catch (Exception e)
             {
                 Warn("打不开目录 " + dir + "：" + e.Message);
+                return false;
             }
         }
 

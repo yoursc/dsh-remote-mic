@@ -10,14 +10,37 @@
 
 ## 跑起来
 
-```bash
-cd diagnostics
-python -m http.server 8000
+**不需要另起任何服务** —— 页面由 local-mic 自己提供，**与 WebSocket 共用一个端口**：
+
+```
+http://127.0.0.1:<端口>/          # 端口默认 8787，本机配的是 18787
 ```
 
-然后打开 `http://localhost:8000`。
+托盘菜单「**打开浏览器诊断页**」直接开它。页面的接缝地址会自动取本页自己的地址，
+**不用手填端口**（主窗口里改过端口也不会对不上）。
 
-> 不能双击 `index.html` 打开。ES module 在 `file://` 下会被 CORS 拦掉。
+> **改了页面不用重编译。** local-mic 启动时会在 exe 向上几层找仓库里的 `diagnostics/`（就是本目录），
+> 找到就**每次请求现读** ⇒ 存盘 + 刷新浏览器即可。只有"找不到这个目录"时才用 exe 内嵌的那份
+> （发布出去的单文件 exe、exe 被拷到别处），且**逐个文件各自回退**。
+> 想知道当前吃的是哪一份：`local-mic --selftest` 最后一段会打印来源与目录，
+> 或 `curl -D - http://127.0.0.1:<端口>/ | grep X-Diag-Source`（`disk` / `embedded`）。
+> exe 与页面不在同一棵目录树时，用 `--diag-dir <目录>` 显式指定。
+>
+> ⚠ 内嵌那份（csproj 的 `EmbeddedResource`）是**发布态**，可能是旧的 —— 发布前重编译一次。
+>
+> 另：仍然**不能双击 `index.html`** 打开 —— ES module 在 `file://` 下会被 CORS 拦掉。
+
+### 用哪个浏览器
+
+**推荐 Edge / Chrome，别用 Firefox。**
+
+Firefox 会在**发起** localhost 的 WebSocket 前随机等待几秒（[Mozilla Bug 1662694](https://bugzilla.mozilla.org/1662694)，
+2020 年至今未修），实测本机 Edge 秒连、Firefox 每次约 8 秒。这与 local-mic 无关 ——
+服务端整条握手实测 5 ms。页面里已经做了两件事：Firefox 打开时开页即提示，
+以及打印「建连 X ms」，超过 1.5 s 会说明慢的是谁。
+
+> 已排除的两个自身嫌疑：`DiagWeb` 每次响应都发 `Connection: close`（不会占住 Firefox 连接池）、
+> WS 的发送队列是每客户端独立的（不会互相阻塞）。详见 `docs/PITFALLS.md` #28。
 
 ## 只有一条路：local-mic
 
@@ -38,8 +61,8 @@ python -m http.server 8000
 local-mic/bin/Release/local-mic.exe     # 托盘程序，双击也行
 ```
 
-端口默认 **8787**，可在 local-mic 主窗口底部改。本页填过的地址会被记住（localStorage），
-下次自动填回 —— 改端口后两边不用反复手打。
+端口默认 **8787**，可在 local-mic 主窗口底部改。**本页与 WS 同一个端口**，所以地址会自动推导；
+只有要把页面连到**另一台** local-mic 时才需要手填，填过的地址会被记住（localStorage）。
 
 ## 开工前必做
 

@@ -24,6 +24,10 @@ namespace DshRemoteMic
             foreach (var a in args)
             {
                 if (a == "--debug") debug = true;
+                // 诊断页默认优先读仓库里 diagnostics/ 那份（见 DiagWeb）；
+                // exe 与页面不在同一棵目录树时用这个显式指定。
+                else if (a.StartsWith("--diag-dir=", StringComparison.Ordinal))
+                    DiagWeb.SetSourceDir(a.Substring("--diag-dir=".Length));
                 else rest.Add(a);
             }
             args = rest.ToArray();
@@ -66,22 +70,75 @@ namespace DshRemoteMic
                 if (!createdNew)
                 {
                     MessageBox.Show(
-                        "DSH 遥控麦克风 local-mic 已经在运行了 —— 请看系统托盘。",
+                        "DSH 遥控麦克风 local-mic 已经在运行了。\n\n" +
+                        "图标在系统托盘（Windows 11 常折叠进「隐藏的图标」区，点任务栏的 ^ 展开）。",
                         "local-mic", MessageBoxButtons.OK, MessageBoxIcon.Information);
                     return;
                 }
 
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
-                Application.ThreadException += (s, e) =>
-                    MessageBox.Show("未处理异常：" + e.Exception.Message, "local-mic",
-                        MessageBoxButtons.OK, MessageBoxIcon.Error);
+                Application.ThreadException += (s, e) => ReportFatal(e.Exception);
+                AppDomain.CurrentDomain.UnhandledException += (s, e) => ReportFatal(e.ExceptionObject as Exception);
 
-                var localMic = new LocalMic();
-                localMic.Start();
-                Application.Run(new TrayApp(localMic));
-                DebugLog.Close();               // 收尾写 report.txt
+                try
+                {
+                    var localMic = new LocalMic();
+                    localMic.Start();
+
+                    var tray = new TrayApp(localMic);
+
+                    if (Integrity.TrayIconUnavailable)
+                    {
+                        // 低完整性下 Windows 拒绝发放托盘图标（UIPI），而主窗口平时只能从托盘打开
+                        // ⇒ 不兜底就成了"双击了，什么也没有"的隐形进程：活着、WS 在听，但看不见也关不掉。
+                        // 常见成因不是启动方式，而是 exe 继承了目录的 Low 强制标签（见 Integrity 注释）。
+                        tray.RunWithoutTray(
+                            "（完整性 " + Integrity.CurrentName + "：系统不发放托盘图标，关窗即退出）");
+                    }
+                    Application.Run(tray);
+                }
+                catch (Exception e)
+                {
+                    // 启动阶段（构造 LocalMic / Start）的异常不会被 ThreadException 接住 ——
+                    // 它在消息泵启动之前抛出；WinExe 又没有控制台。不显式报出来，用户看到的
+                    // 现象只是"双击了，托盘里什么都没有"（真机上正是这么丢过一次：读配置
+                    // 要求了写权限，被沙箱拒绝）。
+                    ReportFatal(e);
+                }
+                finally
+                {
+                    DebugLog.Close();           // 收尾写 report.txt
+                }
             }
+        }
+
+        /// <summary>
+        /// 把致命异常落到 exe 旁边的 start-error.log，并弹一个能读懂的框。
+        /// 两条路各自包着 try：报告本身绝不能再抛。
+        /// </summary>
+        private static void ReportFatal(Exception e)
+        {
+            if (e == null) return;
+
+            string log = null;
+            try
+            {
+                string dir = Path.GetDirectoryName(System.Reflection.Assembly.GetEntryAssembly().Location);
+                log = Path.Combine(dir, "start-error.log");
+                File.AppendAllText(log,
+                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "  " + e + Environment.NewLine);
+            }
+            catch { }
+
+            try
+            {
+                MessageBox.Show(
+                    "local-mic 启动失败：\n\n" + e.Message +
+                    (log != null ? "\n\n详细堆栈已写入：\n" + log : ""),
+                    "local-mic", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            catch { }
         }
 
         private static void RunSelfTest(string outPath)
@@ -93,12 +150,15 @@ namespace DshRemoteMic
                 var adpcm = AdpcmDecoder.RunSelfTest();
                 var session = AtvvSession.RunSelfTest();
                 var vectors = Protocol.RunSelfTest();
-                report = adpcm + Environment.NewLine + session + Environment.NewLine + vectors;
+                var diag = DiagWeb.SelfTest();          // 内嵌页面资源齐全（漏编译 ⇒ 页面 404，肉眼难查）
+                report = adpcm + Environment.NewLine + session + Environment.NewLine + vectors +
+                         Environment.NewLine + diag;
 
                 int bad = 0;
                 if (adpcm.IndexOf("自检通过", StringComparison.Ordinal) < 0) bad++;
                 if (session.IndexOf("自检通过", StringComparison.Ordinal) < 0) bad++;
                 if (vectors.IndexOf("夹具通过", StringComparison.Ordinal) < 0) bad++;
+                if (diag.IndexOf("自检通过", StringComparison.Ordinal) < 0) bad++;
                 code = bad == 0 ? 0 : 1;
             }
             catch (Exception e)
