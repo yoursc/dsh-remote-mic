@@ -98,6 +98,14 @@
    - 校验 `capture.txt` 帧数/时长，`capture.wav` 试听
    - `node diagnostics/decode-bin.mjs capture.bin` 与 C# 输出**逐字节比对**
 3. **端到端联调**：按住遥控器 → 文字进输入框 → 手动触发发送（松手不自动发）
+4. **修 `TrayApp` 的 GDI 句柄泄漏**（2026-10-01 顺带发现，不阻塞 v1）：
+   `RefreshUi()` 每次都 `MakeIcon(c)` 新建一个 `Bitmap` + `Icon.FromHandle`，
+   并 `KeepAlive.Add(...)` **永久保留、从不移除** ⇒ 每一次状态 / 设备 / 电量变化泄漏一个 GDI 句柄。
+   托盘程序是常驻的，长期跑会缓慢累积（GDI 对象默认上限 10 000）。
+   现状：无功能影响，纯泄漏。修法二选一 ——① 按颜色缓存图标复用，别每次重画；
+   ② 用 `new Icon(icon, icon.Size)` 克隆而不是 `FromHandle`，且只在颜色变化时重建。
+   **别删 `KeepAlive` 这个静态列表**（`Icon.FromHandle` 的句柄依赖原 `Bitmap` 存活，
+   提前回收会让图标变黑——那是 #24 之前踩过的坑，注释已标）
 
 ## 尚未验证 / 未定项
 

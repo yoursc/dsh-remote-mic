@@ -40,6 +40,17 @@
 | 29 | **🔴 "等待 X 的超时"必须从真正开始等的那一刻起算，不能从发起动作起算** | 2026-10-01 真机（Firefox）：`connect()` 的 15 秒 ready 超时从 `new WebSocket()` 起算，而 Firefox 建连本身能拖 20 秒+（#28）⇒ 超时先把 connect() 判死走 catch（「连接」按钮恢复可用），随后 socket 迟到地连上、state/ready 照常到，状态徽标打出 **connected**，但"await 成功"那条更新按钮的路径已永远走不到 ⇒ **状态与按钮各说各话**。修法：① 超时改在 `onopen` 里起算（等的东西——hello→ready——那时才开始存在）；② 按钮/状态收敛到**唯一真相源** `setConnUI()`，由 onOpen/onClose 驱动，不走"await 之后的顺序代码"；③ `settle` 只认第一次，超时/出错/关闭三条路后到的丢弃；④ 判死的那次尝试要 `disconnect()` 收尸，否则僵尸连接还在订阅音频 | — |
 | 28 | **🔴 Firefox 会延迟发起 localhost 的 WebSocket（与本项目无关）** | 2026-10-01 真机：诊断页点「连接」，Edge **秒连**，Firefox **每次约 8 秒**；而 local-mic 那头整条握手实测 **5 ms**（裸 TCP 探针跑 3 次：TCP 2 ms / 握手 4 ms / ready 1 ms）⇒ 时间全耗在浏览器里，且 `state` 与 `ready` 同一秒到达（说明 WS 到那一刻才真正 open）。根因 **Mozilla [Bug 1662694](https://bugzilla.mozilla.org/1662694)**（2020，RESOLVED INCOMPLETE 未修）：Firefox 会延迟**发起** localhost 的 WebSocket，连 socket 都不开，随机最长 45 s；只影响 localhost，Chrome/Edge 不复现；刷新页面无效，得彻底退出 Firefox 等一会儿。另一个复现路径：**先连一个没在监听的端口失败**，会拖住之后所有 localhost 的 WS —— 所以别留着失败的连接。**别去优化 local-mic**：页面里已加浏览器检测（Firefox 开页即提示）+ 建连耗时日志（>1.5 s 时解释是谁慢）。排除了我们自己的两个嫌疑：`DiagWeb` 每次都发 `Connection: close`（不占 Firefox 连接池）、WS 发送队列每客户端独立（不互相阻塞） | — |
 
+| 30 | **🔴 仓库是 Medium 标签 ⇒ 低完整性进程写不进去（#26 的副作用）** | #26 把仓库目录的强制完整性标签从 Low 改成 Medium（`(OI)(CI)M`），托盘图标随之恢复正常。**但 Windows 的强制标签带 `No-Write-Up`：`Mandatory Label\Medium (NW)` 的意思是"低完整性不许写"**。于是任何以 **Low IL** 运行的工具（典型：AI 编码助手的沙箱 shell）都**写不进本仓库任何文件** —— `dotnet build` 报 `error MSB3491: Access to the path 'obj\Release\...cache' is denied`，手工 `Set-Content` 同样被拒。**这个报错与 DACL 无关**：`icacls` 显示 `OWEN\OWEN:(I)(OI)(CI)(F)` 完全控制俱全，拒绝来自完整性级别，不是权限配置错。诊断两条命令：`whoami /groups` 看自己进程的 `Mandatory Label`（Low = `S-1-16-4096`），`icacls <仓库>` 看 `Mandatory Label` 行。**处理：在沙箱外（用户正常 IL）跑构建与运行**。⛔ **别用 `icacls /setintegritylevel … L` 去"修"这个报错** —— 那正是 #26 修掉的 Low 标签，降回去 exe 继承 Low IL，托盘图标与 explorer 子进程立刻复发（#22 #23）。两个坑互为反向，别按下葫芦浮起瓢 | — |
+
+| 31 | **🔴 #26 只修好了公式的一半：「启动者 IL 低」照样拿不到托盘图标** | #26 的公式是 `进程 IL = min(用户 IL, exe 文件标签)`，而当时的修复（`icacls … /setintegritylevel (OI)(CI)M /T` + 重编译）**只把第二项拉满**。**第一项低时结果是照旧的低**：从 Low 完整性上下文（典型＝**AI 编码助手的沙箱 terminal**，本机实测 `whoami /groups` = `Mandatory Label\Low` / `S-1-16-4096`）启动 local-mic，`min(Low, Medium) = Low` ⇒ Windows 拒绝 `Shell_NotifyIcon` ⇒ **托盘里什么都没有**（PITFALLS #22）。2026-10-01 真机复现（同一份 exe，只换启动方式）：
+
+  | 启动上下文 | 实测进程 IL | 托盘图标 | 主窗口 |
+  |---|---|---|---|
+  | 桌面/资源管理器、正常 IL | `0x2000` Medium | ✅ 冷启动 **t=0s** 注册成功，`IsOffscreen=False` | 不自动弹 |
+  | **Low 上下文** | `0x1000` Low | ❌ UIA 遍历通知区域 **NOT FOUND** | 自动弹，标题带 `（完整性 Low：系统不发放托盘图标，关窗即退出）` |
+
+  **别当成托盘 bug 去改代码** —— 兜底是**设计内的正确行为**（`Integrity.TrayIconUnavailable` → `RunWithoutTray`，直接开主窗口 + 把"关窗"改成"退出"，避免无图标无窗口的隐形进程）。**判据：主窗口标题带不带那句完整性说明**，带了就说明启动方式有问题。⛔ 别再动文件标签去"修"，那是 #26 的地盘，改了反而把 #22 #23 请回来。取证/核查见 `HARDWARE.md` §3.1 | — |
+
 **链路质量验证公式**：`到达帧数 × 15 ms ÷ 按住时长 = 实时送达率`（分母是**真实音频时长**，不是收集窗口）。
 
 ⚠ **送达率只在首帧到末帧之间算**：窗口两端天然没有音频（按下→开流约 180 ms，松手→收尾约 630 ms），

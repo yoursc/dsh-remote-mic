@@ -178,6 +178,35 @@ Service base: AB5E0000-5A21-4F05-BC7D-AF01F617B664
 
 > **配对交给 Windows 自己**（用户明确要求）：local-mic 不调 `PairAsync`，只**检测配对状态**并直连；"在 Windows 中配对遥控器…"菜单项打开 `ms-settings:bluetooth`。
 
+### 3.1 🔴 怎么启动 local-mic：进程完整性级别决定一切
+
+Windows 的**强制完整性标签**带 `No-Write-Up` —— **低完整性（Low IL）进程不能写高完整性对象**。而进程 IL 不是天生的：
+
+```
+进程 IL = min(启动者 IL, exe 文件的强制完整性标签)     ← 两个因子，任一低结果就是 Low
+```
+
+Low IL 下 Windows **硬性拒绝** `Shell_NotifyIcon`（`GetLastError=5`，PITFALLS #22），症状是"双击了、什么也没有"。
+
+| 启动方式 | 启动者 IL | 结果 |
+|---|---|---|
+| 资源管理器 / 普通桌面双击 | Medium | ✅ 托盘图标正常 |
+| **Low 完整性上下文**（AI 编码助手的沙箱终端、部分加固/沙箱软件、低权限计划任务） | Low | ❌ **没有托盘图标**，自动弹出主窗口 |
+
+仓库目录已用 `icacls /setintegritylevel (OI)(CI)M` 设为 **Medium**（PITFALLS #26）—— 但那只修好了公式的**第二项**。**启动者**那一项低时照样出不来图标（PITFALLS #31）。
+
+同一个 Low 还有第二个后果：**Low 进程写不进这个 Medium 仓库**（标签上的 `(NW)` = No-Write-Up），于是 Low 上下文里的构建一律报 `error MSB3491: Access denied`。⚠ **这个报错与 DACL 无关**——`icacls` 显示本账号完全控制俱全，拒绝来自完整性级别（PITFALLS #30）。⛔ 别用 `icacls /setintegritylevel … L` 去"消掉"它：那正是 #26 修掉的 Low 标签，降回去托盘图标立刻复发。
+
+**判自己在哪条路径上：**
+
+- 主窗口标题带 `（完整性 Low：系统不发放托盘图标，关窗即退出）` ⇒ 走了兜底，**没有托盘图标**
+- 标题干净 + 通知区（可见区，非 `^` 折叠区）有色块图标 ⇒ 正常路径
+- `whoami /groups` 看自己的 `Mandatory Label`（Low = `S-1-16-4096`）；`icacls <路径>` 看对象标签
+
+**⇒ 从桌面/资源管理器双击启动 local-mic，不要从 AI 助手的沙箱终端或低权限计划任务启动。**
+
+> 读法参考：兜底本身是设计内的正常行为（`Integrity.TrayIconUnavailable` → `TrayApp.RunWithoutTray`，直接把主窗口开出来并把"关窗"改成"退出"，避免变成无图标无窗口的隐形进程）。Win11 上想确认托盘图标到底注册上没有，用 UI Automation 遍历 `Shell_TrayWnd` —— 经典的 `TB_BUTTONCOUNT` 在 24H2 已经失效（通知区域是 XAML 的）。
+
 ---
 
 ## 4. 键位真值表（RC003 在 Windows 上）
