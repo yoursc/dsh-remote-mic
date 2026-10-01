@@ -197,3 +197,106 @@ type ApprovalOutcome = 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'
 - `packages/experimental/client-ui-voice-input/src/client/mount.ts`（Client 侧挂载与 Remote 注入）
 - `packages/experimental/client-ui-voice-input/src/client/VoiceInput.tsx`（`insertText` 用法实证）
 - `packages/experimental/voice-input-bundle/package.json`（bundle 组合模板）
+
+---
+
+## 7. 我们的插件怎么接（2026-10-01 定案，附本机实证）
+
+> 前几节是官方文档与源码转述；**本节是我们自己的决定**，每条都注明取证来源。
+
+### 7.1 形态：纯 client 插件，不写 Host 部分
+
+本机 `~/.dsh/profiles/desktop/package.json` 的 `dsh.profile.bundles` **已含**
+`@deepseek-ai/dsh-experimental-voice-input-bundle`，而它的 `cordis.patch.yml` 已经 `insert` 了
+`speech-to-text` / `speech-to-text-sensevoice` / `api-speech-to-text` / `ui-voice-input`。
+SenseVoice 模型也已就位（`dataRoot` = `dshHomePath('speech-to-text','sensevoice')`
+→ `model.int8.onnx` 228 MB + `tokens.txt`，另有 `silero_vad.onnx`）。
+
+⇒ **`remote.speech` 已被别人挂载好：我们只消费、不 `$mount`，不需要 Host 包。**
+
+⚠️ **反直觉但关键**：`remote.speech` **不是** dsh 的默认服务——`dsh-api-gateway` 与
+`dsh-api-remotes` 里 `speech` 出现 0 次，它是实验性插件经 `ctx.remote.$mount()` 贡献的。
+**但我们仍然必须用它**：按定案 A1，转写在 Host，**local-mic 只出 PCM16 音频、不出文字**，
+浏览器侧拿到文字的唯一路径就是 `remote.speech.transcribe()`。
+说"可以跳过 remote.speech 直接把音频变文字"的人，是不了解本项目链路。
+
+### 7.2 UI：挂 `conversation.input.right`，与官方麦克风并存
+
+槽位 kind 实测（`dsh-client-ui-conversation/lib/client.js` 的 children 表）：
+
+| 槽位 | kind | 结论 |
+|---|---|---|
+| `conversation.input.activity` | **single** | 官方麦克风已占用 ⇒ **同优先级注册会抛异常** |
+| `conversation.input.right` | **list** | ✅ **我们挂这里** |
+| `conversation.input.left` | list | 备选 |
+
+⚠️ 按 kind 有必填项：**`list` 必须给 `id`**（`keyed` 要 `key`、`chain` 要 `select`）。
+
+**为什么保留官方麦克风而不是禁用它**（2026-10-01 用户拍板）：
+**两个入口语义不同，不是两个麦克风** ——
+
+- 官方麦克风 = **软件触发**：点一下开始、再点一下停，时长由用户掌控
+- 我们的按钮 = **硬件 PTT**：遥控器按住即开麦、松手即出字，时长被固件 **~5.7 s 窗口**卡死
+
+⇒ 视觉必须一眼可区分：遥控器那个做成**按住型**外观，录音中显示**实时时长**并在临近上限时提示。
+做成"两个长得一样的麦克风"是错误表达；同理，`activity` 被官方占着时不要去抢。
+
+### 7.3 接线
+
+```
+接缝 capture{phase:"start"} → span = inputActions.captureInsertion()   ← 快照取在这里
+  ↓ 收 kind=0x02 音频帧，累积 PCM16 s16le / 16 kHz / mono
+接缝 capture{phase:"end"}   → 补 16 kHz 单声道 PCM16 WAV 头
+  ↓
+await ctx.remote.speech.transcribe({ audio, language }, signal)
+  ↓
+inputActions.insertText(text, span) ? 成功→收工 : 存入 pending + 可见提示
+```
+
+**照抄官方的两个要点**（`client-ui-voice-input/lib/client.js` 实证）：
+
+1. **快照在"开始录音"那一刻取**，一路持有到注入，不是注入前才取
+2. 注入冲突后的重试按钮**必须重新取快照**：
+   `insertText(pending, inputActions.captureInsertion())`。
+   ⚠️ `setPending` **不是 dsh 的 API**，是插件自己的 `useState`——但这个模式要抄。
+
+### 7.4 就绪感知：订阅，不轮询
+
+用 `ctx.remote.speech.follow(signal)` 订阅（AsyncIterable\<SpeechSnapshot\>）拿 provider 目录与
+`maxDurationSeconds` / `maxAudioBytes`，而不是一次性 `listProviders()`——
+官方实现就是这么做的，ASR 未就绪能提前知道，UI 才不会在用户说完话之后才报"转写失败"。
+
+### 7.5 F5 拦截：仅接缝就绪时接管
+
+官方 UI **完全不拦 F5**（只监听 `Escape` 取消），所以这块我们独占、**没有冲突**。
+但全局拦截等于**用户从此无法刷新 dsh**，因此（2026-10-01 用户拍板）：
+**只在接缝就绪（已连上 local-mic 且收到 ready）时接管 F5/Ctrl+R，平时交还，并在 UI 上明说"已接管"。**
+
+### 7.6 打包与安装
+
+插件是**普通 npm 包**（不是 dsh workspace 成员），装进 profile 即被登记：
+
+```bash
+dsh plugin --profile desktop add <绝对本地路径>   # 支持本地路径 ⇒ 不必发布即可迭代
+```
+
+清单形状（照本机已装的 `dsh-better-sidebar`）：
+
+```json
+{
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": { "inject": ["@deepseek-ai/dsh-client-ui-slots", "..."], "platform": "web" },
+    "manifestVersion": 1
+  }
+}
+```
+
+⚠️ **必须声明 `dsh.bundle.patch`，否则被判定 `not-bundle` 直接拒收。**
+
+### 7.7 ⚠️ 已知风险：混合内容（部署前必须解决）
+
+本机 dsh Web 走 **http**（19387 返回 401 而非 TLS 握手），`ws://127.0.0.1` 可用。
+但按 AGENTS.md 的目标拓扑，Web 端最终跑在**远程服务器**上——**一旦它是 https，
+浏览器会直接拦截 `ws://127.0.0.1`**（mixed content），整个插件静默失效。
+v1 先在 http 本地形态下跑通；**远程部署前必须解决**（候选：local-mic 增加 wss + 自签证书）。

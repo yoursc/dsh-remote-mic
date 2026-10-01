@@ -91,8 +91,14 @@
 ## 下一步（按顺序）
 
 1. **写 dsh 插件侧** ← 当前这一步，local-mic 与诊断页均已就绪。
-   按 `docs/DSH-SEAMS.md` 的实证 API 接线，直接吃服务端已有的 `sensevoice-local`；
-   必须带 F5/Ctrl+R 拦截（见 AGENTS.md §3 坑速查）
+   接线已定案并有本机实证，见 [`docs/DSH-SEAMS.md` §7](./docs/DSH-SEAMS.md)（2026-10-01）：
+   - **纯 client 插件**，消费已被官方 bundle 挂好的 `remote.speech`（不 `$mount`、不写 Host 部分）
+   - UI 挂 **`conversation.input.right`**（`list` 槽，须给 `id`）——**不是** `activity`（`single`，官方麦克风已占用）
+   - 两个入口语义不同：官方麦克风=软件触发，我们的=**硬件 PTT**（~5.7 s 窗口）⇒ 视觉要能区分
+   - F5 **仅接缝就绪时**接管，平时交还
+   - 打包：`dsh.bundle.patch` 必需；`dsh plugin --profile desktop add <本地路径>` 迭代
+   - 建议三步走，每步可独立验证：**① 挂上 + 连 WS + 显示状态** → ② 接 `transcribe` → ③ 接 `insertText`
+   - 必须带 F5/Ctrl+R 拦截（见 AGENTS.md §3 坑速查）
 2. **取证收尾**（需人工按遥控器）：
    - `local-mic.exe --record capture`（按住语音键说一句 → 松手）
    - 校验 `capture.txt` 帧数/时长，`capture.wav` 试听
@@ -112,8 +118,14 @@
 | 级别 | 项 |
 |---|---|
 | 🔴 | 端到端录音闭环（`--record`）——待人工按遥控器 |
+| 🔴 | **混合内容**：远程 dsh Web 若走 https，浏览器会拦掉 `ws://127.0.0.1`，插件静默失效。本机是 http 故不受影响，但**远程部署前必须解决**（DSH-SEAMS §7.7） |
 | 🟡 | 原始电平（约 −30.6 dBFS）直接喂 ASR 是否够用——决定要不要加会话内定长增益（若加属破坏性变更，须抬 proto） |
 | 🟡 | C# 与 Node 解码器对**真实录音**输出的逐字节一致性（黄金向量已 12/12，真机数据未比） |
-| 🟡 | 服务端是否已安装并准备好 speech 语音包（`sensevoice-local`） |
-| 🟡 | Client 侧插件的 bundle / 挂载写法（照 `voice-input-bundle` 模板，需读其 `cordis.patch.yml`） |
 | 🟡 | RTF 实测——v1.1 复活实时转写的前提，不需要遥控器 |
+
+**已关闭（2026-10-01 本机实证）**：
+
+- ~~服务端是否已安装并准备好 speech 语音包~~ —— 已就位：`~/.dsh/speech-to-text/sensevoice/models/`
+  下 `model.int8.onnx` 228 MB + `tokens.txt`，另有 `silero_vad.onnx`
+- ~~Client 侧插件的 bundle / 挂载写法~~ —— 纯 client 包 + `dsh plugin --profile desktop add <本地路径>`，
+  必须声明 `dsh.bundle.patch`（否则 `not-bundle` 拒收）；写法见 DSH-SEAMS §7.6
