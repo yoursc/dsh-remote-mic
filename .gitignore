@@ -8,6 +8,12 @@ dist/
 build/
 *.tsbuildinfo
 
+# ⚠ 例外：dsh-plugin/lib/ 是**手写源码**，不是构建产物。
+# dsh 客户端插件第 1 步刻意不引入打包器（产物就是手写的 __ModuleLoader__ 包装），
+# 所以这里的 .js 必须入库 —— 否则仓库里只剩一个空的壳，重装即丢。
+# （2026-10-02：目录由 plugin/ 改名 dsh-plugin/，例外同步跟上；漏改会让源码被 lib/ 规则吃掉。）
+!dsh-plugin/lib/
+
 # .NET 构建产物（helper：exe / pdb / config / NuGet 还原物，全部可再生）
 bin/
 obj/

@@ -1,0 +1,13 @@
+# dsh-remote-mic-plugin 的 bundle patch。
+#
+# 这是 npm 包声明的 `dsh.bundle.patch` 层（package.json 里的 dsh.bundle.patch）。
+# 官方安装命令会把本包追加进 profile 的 dsh.profile.bundles，本 patch 随后作为
+# 「插入一行插件」被合并 —— 不需要手改 profile 的 cordis.patch.yml：
+#
+#   dsh plugin --profile desktop add <本包绝对路径>
+#
+# 与参考插件（dsh-better-sidebar / dsh-cost-meter）同构：一行 insert，name 是包名。
+# 我们是纯 client 插件，没有 Host 侧配置，所以没有 config 段。
+- insert:
+    - id: remote-mic
+      name: 'dsh-remote-mic-plugin'

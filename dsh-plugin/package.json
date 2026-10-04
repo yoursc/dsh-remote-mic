@@ -1,0 +1,44 @@
+{
+  "name": "dsh-remote-mic-plugin",
+  "version": "0.1.0",
+  "private": true,
+  "description": "小米 RC003 遥控器 → dsh 语音输入（第 1 步：挂载 + 连 local-mic + 显示状态）",
+  "type": "module",
+  "license": "GPL-3.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-org/dsh-remote-mic"
+  },
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-client-ui-primitives",
+        "@deepseek-ai/dsh-client-ui-plugin-manager"
+      ],
+      "platform": "web"
+    },
+    "manifestVersion": 1
+  },
+  "files": [
+    "lib/client.js",
+    "lib/index.js",
+    "cordis.patch.yml"
+  ],
+  "engines": {
+    "node": ">=20"
+  }
+}
