@@ -16,9 +16,9 @@
 | 5 | [`DSH-SEAMS.md`](./DSH-SEAMS.md) | 写 dsh 插件时 |
 | 6 | [`PITFALLS.md`](./PITFALLS.md) | 踩坑 / 调试时 |
 | 7 | `local-mic/README.md` | 改 local-mic（构建、界面、设计决策）时 |
-| 8 | `research/`（本目录同级） | 追溯历史决策时（过程稿，结论可能过时） |
+| 8 | [`notes/`](./notes/README.md)（本目录同级） | 追溯历史决策时（**中间态过程稿**：不作为结论来源，每份头部标了状态与落点） |
 
-> ⚠️ **优先级**：线缆协议一律以 `PROTOCOL.md` 为准；`research/` 下文件与其他文件冲突时，以其他文件为准。
+> ⚠️ **优先级**：线缆协议一律以 `PROTOCOL.md` 为准；`notes/` 下文件与其他文件冲突时，以其他文件为准。
 
 ---
 

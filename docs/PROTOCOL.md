@@ -1,7 +1,7 @@
 # 本地语音输入源协议 v1（proto 1）
 
 > ✅ **已按评审结果修订全部 14 条**（🔴 R1–R4 + 🟡 Y1–Y10 + 🟢 G1–G3，2026-09-29），修订**全部非破坏性**。
-> 评审报告见 [`docs/research/protocol-review-2026-09-29.md`](./research/protocol-review-2026-09-29.md)。
+> 评审报告见 [`docs/notes/PROTOCOL-proto1-评审-2026-09-29.md`](./notes/PROTOCOL-proto1-评审-2026-09-29.md)。
 >
 > **实现状态**：`local-mic` 与诊断页**均已是 proto 1**（`--selftest` 三段全绿、L2 夹具 24/24）。
 

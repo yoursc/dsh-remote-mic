@@ -79,6 +79,15 @@ RC003          = 蓝牙连的是【本地电脑】，物理上也在本地
 13. GPL-3.0 参考仓库：文档与事实结论可读可引用；**源码不得直接复用或翻译**（用户已拍板，即使许可已兼容——见 §5）。
 14. 引用的开源规格须注明来源。
 
+**文档**
+
+15. `docs/notes/` 只放**中间态过程稿**（调研 / 修改意见 / 评审 / 方案）：**结论必须落进长期文档**，
+    并在过程稿头部登记状态（待落定 / 已落定 / 已废弃）与**落点**；**未登记落点的过程稿不得被引用为结论**。
+    命名 `<主题>-<类型>-<日期>.md`；改完文档跑 `node scripts/check-doc-links.mjs` 做断链体检。
+    模板与清单见 [`docs/notes/README.md`](./docs/notes/README.md)。
+16. `scripts/` 只放**仓库自身的检查 / 维护脚本**（不参与产品、不得被 `local-mic/` 或 `dsh-plugin/` 引用）；
+    新增脚本同时更新 [`scripts/README.md`](./scripts/README.md) 的清单。
+
 ---
 
 ## 3. 坑的规则速查（一句话版）
@@ -95,7 +104,7 @@ RC003          = 蓝牙连的是【本地电脑】，物理上也在本地
 | 型号识别按**前缀匹配 `RC003`**——DIS 里没有 `-MS` 后缀，写死全等会静默匹配失败 |
 | **一个设备同时只能有一个 GATT 客户端**——调试时不要开两个程序连同一遥控器 |
 | 吞吐/送达率的分母用**真实音频时长**（帧数 × 15 ms），且只在首帧到末帧之间算——窗口两端延迟是设计延迟不是丢包 |
-| **语音键 = F5**：浏览器里按下即刷新页面（页面重载、WS 断开、录音中断）——写 dsh 插件必须 `preventDefault()` 拦 F5/Ctrl+R；keydown 取证写 sessionStorage |
+| **语音键 = F5**：浏览器里按下即刷新页面（页面重载、WS 断开、录音中断），**按住还会连发几十次**——插件必须 `preventDefault()` 拦**裸 F5**（`Ctrl+R` / `Ctrl+F5` / `Shift+F5` 放行，给用户留刷新出口；开关与完整口径见 `docs/DSH-SEAMS.md` §7.5）；keydown 取证写 sessionStorage |
 | 诊断日志（每条通知的墙钟毫秒、长度、前 24 字节）优先于任何新功能 |
 | **拒绝对端时必须先把 `error` 同步写上网再关 socket**（`SendThenClose`，不要 `Send` + `CloseClient`）——发送是异步有界队列，socket 一关 error 就没了，对端只看到 1006 且不知道原因（PITFALLS #21） |
 
@@ -113,10 +122,11 @@ RC003          = 蓝牙连的是【本地电脑】，物理上也在本地
 | [`docs/DSH-SEAMS.md`](./docs/DSH-SEAMS.md) | dsh 平台接入点与实证 API（插件端手册） | 写插件时 |
 | [`docs/PITFALLS.md`](./docs/PITFALLS.md) | 真机坑全量：时序、日志证据、排查过程、本机环境 | 踩坑 / 调试时 |
 | [`docs/REFERENCES.md`](./docs/REFERENCES.md) | 参考仓库清单、许可明细、排除记录（MiControl） | 引用外部资料 / 碰许可问题时 |
-| `docs/research/` | 3 份调研过程稿 + proto 1 评审快照（只增不改，结论可能过时） | 追溯历史决策时 |
+| [`docs/README.md`](./docs/README.md) | **文档索引**：哪份是真源、哪份是过程稿、什么时候读 | 找文档 / 接手项目时 |
+| [`docs/notes/`](./docs/notes/README.md) | **中间态过程稿**（调研 / 修改意见 / 评审 / 方案）：**不作为结论来源**，每份头部有状态（待落定 / 已落定 / 已废弃）与落点 | 追溯历史决策时 |
 | `local-mic/README.md` | local-mic 构建、界面、设计决策 | 改 local-mic 时 |
 
-**冲突优先级**：线缆协议 → `docs/PROTOCOL.md`；架构与纪律 → 本文件；进度 → `DEV.md`；`docs/research/` 与任何文件冲突时，以其他文件为准。
+**冲突优先级**：线缆协议 → `docs/PROTOCOL.md`；架构与纪律 → 本文件；进度 → `DEV.md`；`docs/notes/` 与任何文件冲突时，以其他文件为准。
 
 ---
 
