@@ -136,7 +136,7 @@ conformance/adpcm-vectors.txt      ← 单一数据源，由 Node 侧解码器�
 
 ## 线缆协议
 
-> **规范正文见 [`docs/PROTOCOL.md`](../../docs/PROTOCOL.md)（proto 1）。**
+> **规范正文见 [`docs/PROTOCOL.md`](../docs/PROTOCOL.md)（proto 1）。**
 > 本节不复述消息格式 —— 复述必然漂移，规范只有一个真源。
 
 | | 值 |
