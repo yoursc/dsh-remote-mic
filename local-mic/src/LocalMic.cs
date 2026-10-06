@@ -480,15 +480,29 @@ namespace DshRemoteMic
             return s == null ? "" : (s.Length <= n ? s : s.Substring(0, n));
         }
 
+        private string _lastTickNote;
+
+        /// <summary>tick 跳过原因去重落盘：连续相同原因只记第一条（防 5 秒一行刷屏）。</summary>
+        private void TickNote(string note)
+        {
+            if (note == _lastTickNote) return;
+            _lastTickNote = note;
+            DebugLog.Event("tick", note);
+        }
+
         private void Tick(object _)
         {
             if (Interlocked.Exchange(ref _working, 1) == 1) return;
             try
             {
-                if (_ble.IsConnected) return;
+                // ⚠ 这个分支若恒为 true（半失败后 _device 还挂着 Connected 链路），
+                // 重连循环会表现得"彻底死了" —— 落盘就是为了把这种静默卡死钉出来
+                if (_ble.IsConnected) { TickNote("skip:IsConnected=true"); return; }
                 _tick++;
                 bool hasClient = _ws != null && _ws.ClientCount > 0;
-                if (!hasClient && (_tick % 6) != 0) return;   // 无客户端时每 30 秒探一次
+                if (!hasClient && (_tick % 6) != 0) { TickNote("skip:无客户端节流"); return; }   // 无客户端时每 30 秒探一次
+                _lastTickNote = null;   // 重置去重，让随后的 skip 能再记一条（否则卡死期静默）
+                DebugLog.Event("tick", "probe tick=" + _tick + " hasClient=" + hasClient);
                 var ignored = Task.Run(() => EnsureConnectedAsync());
             }
             finally
@@ -510,7 +524,9 @@ namespace DshRemoteMic
             // 串行化：定时器、浏览器上线、启动踢一脚、用户点自检 —— 这些都可能同时触发连接。
             // 以前这里直接靠 BleRemote 的 _busy 挡，后来者会拿到「正在连接中」当成失败返回，
             // 于是自检在启动瞬间点就会莫名其妙地失败。现在让后来者排队，而不是报错。
+            DebugLog.Event("conn", "gate wait");
             await _connectGate.WaitAsync().ConfigureAwait(false);
+            DebugLog.Event("conn", "gate ok");
             try
             {
                 if (_ble.IsConnected) return null;   // 排队期间别人已经连上了
@@ -528,15 +544,17 @@ namespace DshRemoteMic
                 if (err != null)
                 {
                     // 并发踢了一脚，不是故障，别报成错误
-                    if (err == "正在连接中") return err;
+                    if (err == "正在连接中") { DebugLog.Event("conn", "并发踢脚，忽略"); return err; }
 
                     // ⚠ 错误码由 BleRemote 在失败点结构化记下，这里【不解析消息文本】——
                     // WinRT 异常消息是本地化的，靠字符串包含判定在中文系统上会失效。
                     var code = _ble.LastErrorCode;
                     if (string.IsNullOrEmpty(code)) code = "connect_timeout";
+                    DebugLog.Event("conn", "fail code=" + code + " retryable=" + IsRetryable(code) + " msg=" + err);
                     SetError(code, IsRetryable(code), err);
                     return err;
                 }
+                DebugLog.Event("conn", "ok");
                 var name = _ble.DeviceName;
                 if (!string.IsNullOrEmpty(name)) _deviceName = name;
                 SetState("connected", "已连接");

@@ -197,6 +197,48 @@
    **别删 `KeepAlive` 这个静态列表**（`Icon.FromHandle` 的句柄依赖原 `Bitmap` 存活，
    提前回收会让图标变黑——那是 #24 之前踩过的坑，注释已标）
 
+5. **判定层（local-mic 侧）—— 设计已收束（2026-10-06 命名定案），代码尚未写**
+   规格全部 [`docs/STATE-MODEL.md`](./docs/STATE-MODEL.md)，实现时按这里照做，别自己发挥：
+   - **状态命名（2026-10-06 用户定，STATE-MODEL §2.1 有对照表），八态**：
+     前提层 **`BLE_NotExist` / `BLE_Off` / `DeviceNotSelected` / `BLE_Unpaired`**，
+     链路层 **`Connecting` / `Unresponsive` / `Connected`**。`Connecting` 覆盖入口连接与断连后的重试。
+     （命名演变：`NoDevice`→`DeviceNotSelected`；`NotPaired`→`PairLost`→**`BLE_Unpaired`**；
+     `Unreachable` 已拆为 **`BLE_NotExist` + `BLE_Off`**——T17 判据 Radio API + T18 命名均已定案）
+   - **求值链前提层顺序 = `BLE_NotExist`/`BLE_Off` → `DeviceNotSelected` → `BLE_Unpaired`**（§2.3，
+     交集裁定已转正）；Radio 事实由 `Radio.StateChanged` 常驻监听维护，`GetRadiosAsync()` 兜底，
+     失效时**当"蓝牙在"处理**（T17 定案 B）
+   - ⚠ **`Connecting` 已合并入口连接与断连重试**：前提层出口仍使用 20 秒墙钟；Connected 断连后的同一状态使用 fd < 3 / ≥ 3 轮判定。
+     实现上 `Decide` 需要**记忆位**（链路层子态 + 进入时刻 t0），时钟注入为参数（§2.8.1）
+   - 求值顺序 **不能改**（§2.3 的线性链）。⚠ **「前提层 / 链路层」是给人看的分组，不是求值结构**
+     ——别写成分层 switch
+   - ⚠ **前提层不是只能从 `Connected` 掉进去**：每轮 `Decide` 都从头重算，
+     别实现成"只有收到断连事件时才检查前提"
+   - **`Decide(facts)` 必须是不碰 IO 的纯函数**（§2.8.1）：IO 全在采集层 ⇒ 状态切换可用夹具穷举，不依赖硬件
+   - **判据禁用 `IsPaired`**（`PITFALLS` #34），改查注册表 `BTHLE\Dev_*` / `BTHENUM\Dev_*`；
+     现有 5 处引用清单见 STATE-MODEL §7，**全都要改**
+   - **K = 3**（`Connecting` 的断连重试分支使用，fd 只计链路不通）；前提类判据（`BLE_NotExist`/`BLE_Off` 等）**不数 K**（判定短路）；
+     **失败分两本账**（§2.4）：fd=链路账本（K=3 消费者），gd=GATT 账本（链路通但枚举失败，**60 s 窗口**，期间 fd 冻结、只报 `connecting`；`Connecting` 墙钟对 gd 让位）；fd **跨状态累加**，只有连接成功归零（两本账同时归）
+   - 🔴 **重连定时器不得因 `Unresponsive` 而放慢/停止**（§2.4）—— 自愈路径真的存在
+     （2026-10-04 §4.6 有一次：干等 210 s 后自己连上）
+   - **判定时机**：① 每次尝试后（规则）/ ② 程序启动（已定案）/ ③ 断连事件（已定案，且按结果决定是否立刻尝试）
+     / ④ 🆕 **本机蓝牙监听**（`Radio.StateChanged` + `DeviceWatcher`，已验证可订阅）
+     ⇒ **监听不能替代轮询**（§2.8.2）：事件用于立刻感知，Tick 保留作兜底，两者同调 `Decide`；
+     ⛔ `Radio` / `DeviceWatcher` 对象必须**保住强引用**，被 GC 后事件静默失效
+   - 前置 UI 改动：`MainForm.cs:429` 选择列表最后加「（不选择设备）」空项
+     （`SetAddress(0, "")` 已支持，判定层无需新增逻辑）
+   - ⚠ 协议侧三条（T10 / T11 / T12）已按用户 2026-10-05 指示**挂起**，实现判定层时不要顺手动
+
+### 待办 0 · 状态模型定稿后的协议同步与代码实现（当前阻塞项）
+
+- **状态模型完全定稿前，不修改 `docs/PROTOCOL.md`，也不开始状态判定层代码改造。** 当前协议仍以 proto 1 冻结规范为准。
+- 状态模型定稿后，统一回头同步 [`docs/PROTOCOL.md`](./docs/PROTOCOL.md)：判定态→协议 `state` 映射、`error.code` / `retryable`、`device.paired` 语义，以及 `device_not_found` / `connect_timeout` 的触发说明。
+- 状态模型定稿后，按设计实现 local-mic 判定层；当前代码与设计存在已知脱节，至少包括：代码仍是协议四态、仍可能自动选设备、仍读取 `IsPaired`、fd/gd 两本账未实现、Radio / DeviceWatcher 尚未接入生产判定层、`Connecting` 入口态尚未实现。
+- 上述代码脱节在状态模型定稿前只登记，不做局部修补，避免实现中间设计后返工。
+
+### 待办 0.1 · ✅ 已完成（2026-10-06）：状态图更新为八态
+
+- [`docs/drawio/state-model.drawio.svg`](./docs/drawio/state-model.drawio.svg) 已按八态模型重画并用 draw.io Desktop CLI 官方导出（`-x -f svg -e -t -u`，含内嵌图源 / 严格转义 / 明暗自适应）；[`docs/drawio/README.md`](./docs/drawio/README.md) 的文件清单已同步为八态。
+
 ## 待办（2026-10-02 立项，均未开工）
 
 ### 待办 1 · （✅ 已完成 2026-10-02）插件改动的「事前辩证」纪律 → 已落进插件开发手册
@@ -328,6 +370,11 @@ A 连上 ⇒ 开、B 断开 ⇒ 关 —— **后到者决定，安全方向错�
 | 🟡 | 原始电平（约 −30.6 dBFS）直接喂 ASR 是否够用——决定要不要加会话内定长增益（若加属破坏性变更，须抬 proto） |
 | 🟡 | C# 与 Node 解码器对**真实录音**输出的逐字节一致性（黄金向量已 12/12，真机数据未比） |
 | 🟡 | RTF 实测——v1.1 复活实时转写的前提，不需要遥控器 |
+| ✅ | **判定层 T6（2026-10-06 已测）**：拿远出范围 ≈55 s ⇒ `disconnected` → Reconnecting（10 s/轮 ×4），拿回后 **1 s 链路自愈**。形态 = Unresponsive/休眠同款"建连超时"，证实 `device_not_found` 推测不成立；**但暴露致命误判**：恢复瞬间 `枚举特征失败：AccessDenied` → `BleRemote.cs:329` 误判 `pairing_required`(retryable=false) ⇒ **重连停止**（假 `BLE_Unpaired`，详见 HARDWARE.md 连接行为节 ⚠）→ 派生修复项：§6 既定改造（判配对改查注册表）须落地。**同日复核**：真凶是失败后未 `DisposeDevice` 致 `IsConnected` 卡真（已修，两轮锡箔纸 23 次失败扛住自愈）；恢复后 AccessDenied 持续 36–54 s ⇒ STATE-MODEL §2.4 拆 fd/gd 两本账 |
+| ✅ | **判定层 T7（2026-10-06 关闭为"物理不可测"）**：电池内置，抠不了也耗不尽 ⇒ 按假设合流 `Unresponsive`（与睡死同签名，指引"按一下"无害） |
+| 🟡 | **判定层 T8**：遥控器被**别的主机连走** —— 未测（暂按 `Unresponsive` 兜底；不阻塞 v1） |
+| 🟡 | **判定层 T9**：连接态能否拿到 **RSSI**（`System.Devices.Aep.SignalStrength`）—— 若能，`Unresponsive` 里"休眠"与"不在范围"就可拆开 |
+| ✅ | **判定层场景 3/5（2026-10-06 已测）**：睡死⇒撤障碍不自愈、只有按键唤醒（1 s 回连零 AccessDenied）；休眠阈值收窄 2.5–5 min；`BLE_Unpaired` 签名 = `reg=no`+`IsPaired=False`（create 不可靠）；reg 重配后数秒滞后；PITFALLS #32 未复现。全部落档 HARDWARE.md / STATE-MODEL.md |
 
 **部署 / 开发拓扑（2026-10-02 实测确认，插件已连通）**
 

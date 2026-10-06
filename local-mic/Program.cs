@@ -36,6 +36,7 @@ namespace DshRemoteMic
             {
                 string dir = DebugLog.Enable();
                 Console.WriteLine(dir == null ? "调试日志开启失败" : "调试日志目录：" + dir);
+                DebugLog.StartRadioWatch();   // 关/开蓝牙的事件落 kind="radio"
             }
 
             // 开发用自检入口：

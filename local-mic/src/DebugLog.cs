@@ -4,6 +4,9 @@ using System.Globalization;
 using System.IO;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
+using Microsoft.Win32;
+using Windows.Devices.Radios;
 
 namespace DshRemoteMic
 {
@@ -184,6 +187,76 @@ namespace DshRemoteMic
         public static void MarkPress()
         {
             lock (Sync) { if (_pressMs < 0) _pressMs = Clk.ElapsedMilliseconds; }
+        }
+
+        // ---------- 判定层取证探针（2026-10-06 加桩） ----------
+        // 状态转移程序（docs/STATE-MODEL.md）的判据全靠"每轮重连那一刻世界长什么样"：
+        // Radio 开没开、注册表里有没有这个地址、WinRT 报不报事件。
+        // 这些事实只能现读；读不到本身也是事实（记成 err:类型名），不许静默吞掉。
+
+        private static Radio _btRadio;   // 必须强引用：被 GC 收掉后 StateChanged 会静默失效
+
+        /// <summary>订阅蓝牙 Radio 状态变化（事件落 kind="radio"）。只在 --debug 时调用。</summary>
+        public static void StartRadioWatch()
+        {
+            if (!On || _btRadio != null) return;
+            var ignored = WatchRadioAsync();
+        }
+
+        private static async Task WatchRadioAsync()
+        {
+            try
+            {
+                var radios = await Radio.GetRadiosAsync().AsTask().ConfigureAwait(false);
+                foreach (var r in radios)
+                {
+                    if (r.Kind != RadioKind.Bluetooth) continue;
+                    _btRadio = r;
+                    Event("radio", "watch 开始 state=" + r.State);
+                    r.StateChanged += (s, e) =>
+                    {
+                        try { Event("radio", "StateChanged -> " + ((Radio)s).State); }
+                        catch { }
+                    };
+                    return;
+                }
+                Event("radio", "watch 开始：找不到蓝牙 Radio");
+            }
+            catch (Exception e) { Event("radio", "watch 失败：" + e.GetType().Name); }
+        }
+
+        /// <summary>蓝牙 Radio 现状快照（On/Off/…）。读不到也是数据。</summary>
+        public static async Task<string> ProbeRadioAsync()
+        {
+            try
+            {
+                var radios = await Radio.GetRadiosAsync().AsTask().ConfigureAwait(false);
+                foreach (var r in radios)
+                    if (r.Kind == RadioKind.Bluetooth) return r.State.ToString();
+                return "no-radio";
+            }
+            catch (Exception e) { return "err:" + e.GetType().Name; }
+        }
+
+        /// <summary>
+        /// 配对判定的结构化事实：HKLM BTHPORT\Parameters\Devices 下有没有该地址。
+        /// 不靠 WinRT 的 IsPaired（三向不可信，PITFALLS #34）。读不到（权限等）记 err:类型名。
+        /// </summary>
+        public static string ProbePairedInRegistry(ulong addr)
+        {
+            try
+            {
+                using (var k = Registry.LocalMachine.OpenSubKey(
+                    @"SYSTEM\CurrentControlSet\Services\BTHPORT\Parameters\Devices"))
+                {
+                    if (k == null) return "key-missing";
+                    string hex = addr.ToString("x12", CultureInfo.InvariantCulture);
+                    foreach (var sub in k.GetSubKeyNames())
+                        if (string.Equals(sub, hex, StringComparison.OrdinalIgnoreCase)) return "yes";
+                    return "no";
+                }
+            }
+            catch (Exception e) { return "err:" + e.GetType().Name; }
         }
 
         public static void MarkEnd()

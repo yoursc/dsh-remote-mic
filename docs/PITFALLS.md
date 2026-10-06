@@ -28,7 +28,7 @@
 | 16 | **`FromBluetoothAddressAsync` 返回不代表已连上** | 必须等 `ConnectionStatusChanged` 到 Connected | — |
 | 17 | **本机代理会劫持 localhost** | `curl` 加 `--noproxy '*'`；Python 客户端设 `no_proxy=localhost,127.0.0.1` | §2 |
 | 18 | **Windows 输入法相关的坑** | 若走全局 SendInput 路线会遇到 IME / UIAccess 问题；**v1 走 dsh 输入框注入可规避** | — |
-| 19 | **🔴 语音键 = F5，浏览器里按下即刷新页面** | 页面内 `keydown` 对 `F5`/`Ctrl+R`/`BrowserRefresh` 调 `preventDefault()`；keydown 取证写 sessionStorage（页面重载会清空内存日志） | `HARDWARE.md` §4.1.1 |
+| 19 | **🔴 语音键 = F5，浏览器里按下即刷新页面** | 页面内 `keydown` 只对**裸 F5**调 `preventDefault()`；`Ctrl+R` / `Ctrl+F5` / `Shift+F5` 放行；keydown 取证写 sessionStorage（页面重载会清空内存日志） | `HARDWARE.md` §4.1.1 |
 | 20 | **音频帧漏加 kind `0x02`** | kind 若由调用方自己拼，容易漏掉一个字节，表现为"短消息全对、音频全错"。修法：在**接缝出口**（`WsServer.BuildAudioPayload`）加，调用方只管 PCM | — |
 | 21 | **🔴 异步发送队列 + 立刻关 socket ⇒ error 帧胎死腹中** | 拒绝时对端**必须先收到 `error` 再断**（`PROTOCOL.md` §6）。而 `WsServer.Send` 只入队，真正的 `Stream.Write` 在另一个线程的排空任务里（这样设计是为了不阻塞 BLE 派发线程），紧跟着 `CloseClient` 就把 socket 拆了 ⇒ error 基本没机会落地，客户端只看到 WebSocket **1006**，**永远不知道自己为什么被踢**。拒绝对端时一律用 `SendThenClose`（同步写，写完再关），不要 `Send` + `CloseClient` | — |
 | 22 | **低完整性进程拿不到托盘图标** | 进程 IL 低于 Medium 时 `Shell_NotifyIcon(NIM_ADD)` 返回 false、`GetLastError=5` ⇒ 没有托盘图标、而主窗口只能从托盘打开 ⇒ 用户看到"双击了，什么都没有"。现由 `Integrity.TrayIconUnavailable` 检测并走 `TrayApp.RunWithoutTray(reason)`：直接开主窗口 + **关窗即退出**（否则会变成无图标无窗口的隐形进程）。**成因多半不是"启动方式被沙箱化"，而是 exe 继承了目录的 Low 强制标签 —— 见 #26**，别去怪 explorer 或安全软件 | — |

@@ -65,7 +65,7 @@ RC003          = 蓝牙连的是【本地电脑】，物理上也在本地
 5. 接缝词汇必须设备无关：ATVV opcode、帧结构、编码格式、session_id 全部下沉 local-mic，任何硬件概念漏到插件侧的设计都不合格。
 6. 凡接缝语义的判定逻辑，做成**不依赖 IO 的纯函数**（如 `Protocol.Handshake` / `classifyMessage`）——否则夹具测不到生产逻辑。
 7. 生产侧新逻辑必须配**无硬件回归**（`IAtvvTransport` + FakeTransport 模式）。
-8. 错误码判定用**结构化事实**（如 `IsPaired`），禁止解析 WinRT 本地化消息文本——否则英文系统正确、中文系统失效。
+8. 错误码判定用**可靠的结构化事实**（如注册表配对存在性、`ConnectionStatus`、Radio 状态），禁止使用不可信的 `IsPaired`，也禁止解析 WinRT 本地化消息文本——否则英文系统正确、中文系统失效。
 9. 枚举值域按兜底代价分档：`reason`/`state` 封闭（未知会丢字/丢门控），`error.code` 开放（未知按 `retryable` 处理无损失）。`state`/`error` 是状态语义，只在取值变化时推送；死字段一律删。
 
 **硬件与调试**
@@ -87,6 +87,18 @@ RC003          = 蓝牙连的是【本地电脑】，物理上也在本地
     模板与清单见 [`docs/notes/README.md`](./docs/notes/README.md)。
 16. `scripts/` 只放**仓库自身的检查 / 维护脚本**（不参与产品、不得被 `local-mic/` 或 `dsh-plugin/` 引用）；
     新增脚本同时更新 [`scripts/README.md`](./scripts/README.md) 的清单。
+    ⛔ **新增脚本须先经用户同意** —— 有现成官方工具/命令时优先用它并把用法写进文档，
+    不要自造（2026-10-05 教训：自造的 `export-drawio-svg.mjs` 未经同意入库，已被要求删除）。
+
+**图表**
+
+17. 文档里的示意图**一律用 draw.io**（diagrams.net），文件放 [`docs/drawio/`](./docs/drawio/)，
+    格式固定为 **`.drawio.svg` 单文件**（渲染图 + 内嵌图源同一份，不失配），**不另存 `.drawio`**。
+    文档里用 `![说明](./drawio/xxx.drawio.svg)` 引用。
+    ⛔ **只用 draw.io 官方导出**（GUI 或 Desktop CLI）—— 不要自造转换脚本，也不要拿程序去
+    "优化"已导出的 svg（会丢明暗自适应 / 富文本双路 / 透明背景）。
+    **怎么画、怎么导出、CLI 参数与坑见 [`docs/drawio/README.md`](./docs/drawio/README.md)**
+    （新增图同时更新该页的文件清单）。
 
 ---
 
@@ -109,6 +121,7 @@ RC003          = 蓝牙连的是【本地电脑】，物理上也在本地
 | **拒绝对端时必须先把 `error` 同步写上网再关 socket**（`SendThenClose`，不要 `Send` + `CloseClient`）——发送是异步有界队列，socket 一关 error 就没了，对端只看到 1006 且不知道原因（PITFALLS #21） |
 | **重配对后第一次连接会报 `枚举特征失败：AccessDenied`（已配对）**——不是代码 bug：**再删再配一次**即恢复（与"首次配对 55% 送达率"同源）。排查时**别用第二个 GATT 客户端下结论**：local-mic 占着设备时，探针连上去看到的 GATT 表是裁剪过的（会以为 ATVV 服务没了）。判状态优先读接缝的 `state`/`device`，不抢设备（PITFALLS #32） |
 | **🔴 遥控器断连约 1 分钟后休眠、不再响应回连**——干等 5 分钟、30 轮重试全部无效，**按一下遥控器任意键 ⇒ 秒连**。⛔ 别靠加快/增加重试（设备不响应，踢也没用）：正解是**条件触发**地提示"请按一下遥控器"。⛔ 提示**不能常驻**——静置 34 分钟零断链，常驻会变噪音。⚠ 休眠阈值**未量化**（35 s ~ 2 min），**不得写进代码**（PITFALLS #33） |
+| **🔴 设备状态只有两个真相源**——**判定层**（进程内 7 态，见 `docs/STATE-MODEL.md`）+ **协议层**（跨进程 4 值 + `error.code`）。插件只消费协议结果，不得自带判据（不得直读 `IsConnected`/`IsPaired`）；判定层判据**禁用 `IsPaired`**，改查注册表。蓝牙开没开用 `Radio.StateChanged` 常驻监听判定（关蓝牙期间 WinRT 链路零事件，断连事件可能不到达） |
 | **🔴 判"能不能用"只看 `state`，绝不用 `device.paired`**——`paired` 三个方向都错：已配对能读电量时报 `false`、删除配对后仍报 `true`、连自报都不稳。`battery` 断连时是**陈旧值**，也不能当在线证据。插件侧的同一警告见 `docs/DSH-SEAMS.md` §7.10（PITFALLS #34） |
 | **凡"没消息"的观测必须有心跳**——`state`/`device` 是状态语义、只在变化时推送，所以"日志没记录"既可能是链路稳定，也可能是观测脚本死了。观测脚本每 30 s 写心跳并报告已静默多久，否则阴性结果（"什么都没发生"）不可信 |
 
@@ -122,11 +135,13 @@ RC003          = 蓝牙连的是【本地电脑】，物理上也在本地
 | [`DEV.md`](./DEV.md) | 功能计划、完成度、下一步、未验证项 | 每次开工前；**每次开发后更新** |
 | [`README.md`](./README.md) | 面向用户：项目是什么、怎么用 | 分发 / 介绍时 |
 | [`docs/PROTOCOL.md`](./docs/PROTOCOL.md) | **线缆协议规范（proto 1，已冻结）——唯一真源** | 碰 local-mic↔客户端通信时 |
+| [`docs/STATE-MODEL.md`](./docs/STATE-MODEL.md) | **状态模型**：判定层 7 态（定义/判据/优先级/转移/两本账）+ 判定态→协议映射表（含不确定项登记） | 改状态判定 / 写 UI 提示 / 动 `error.code` 时 |
 | [`docs/HARDWARE.md`](./docs/HARDWARE.md) | RC003 硬件、ATVV 协议规格、键位真值表（local-mic 端手册） | 改 local-mic / 碰硬件时 |
 | [`docs/DSH-SEAMS.md`](./docs/DSH-SEAMS.md) | dsh 平台接入点与实证 API（插件端手册） | 写插件时 |
 | [`docs/PITFALLS.md`](./docs/PITFALLS.md) | 真机坑全量：时序、日志证据、排查过程、本机环境 | 踩坑 / 调试时 |
 | [`docs/REFERENCES.md`](./docs/REFERENCES.md) | 参考仓库清单、许可明细、排除记录（MiControl） | 引用外部资料 / 碰许可问题时 |
 | [`docs/README.md`](./docs/README.md) | **文档索引**：哪份是真源、哪份是过程稿、什么时候读 | 找文档 / 接手项目时 |
+| [`docs/drawio/`](./docs/drawio/README.md) | **示意图**：`*.drawio.svg` 单文件图源 + 怎么画 / 怎么导出（GUI、CLI 参数与坑） | 画示意图 / 改图 / 导出时 |
 | [`docs/notes/`](./docs/notes/README.md) | **中间态过程稿**（调研 / 修改意见 / 评审 / 方案）：**不作为结论来源**，每份头部有状态（待落定 / 已落定 / 已废弃）与落点 | 追溯历史决策时 |
 | `local-mic/README.md` | local-mic 构建、界面、设计决策 | 改 local-mic 时 |
 

@@ -52,8 +52,10 @@ function collectMarkdown(dir) {
  * 取出一行里所有 markdown 链接目标。
  * 只认相对路径（`./` `../` 或无前缀的非 URL），忽略锚点、`mailto:` 与绝对 URL。
  */
-function linkTargets(line) {
+function linkTargets(rawLine) {
   const targets = []
+  // 先剥掉行内代码（`…`）：写在那里面的路径只是**示例**，渲染出来不是链接，不该算断链。
+  const line = rawLine.replace(/`[^`]*`/g, '``')
   const re = /\[[^\]]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g
   let m
   while ((m = re.exec(line)) !== null) {

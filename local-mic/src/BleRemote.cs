@@ -100,49 +100,48 @@ namespace DshRemoteMic
         /// <summary>
         /// 按地址直连。已配对设备即使不广播也能连上（WinRT 的 FromBluetoothAddressAsync
         /// 不需要广播），这一点已由 Python 版探针在真机上验证。
+        ///
+        /// 外层这一圈是 2026-10-06 加的取证桩：每轮连接尝试落一条 kind="round" 事实行
+        /// （判定层设计的原始数据：Radio 状态 / 注册表有无地址 / 卡在哪一步 / 各步耗时），
+        /// 连接本体在 <see cref="ConnectCoreAsync"/>。
         /// </summary>
         public async Task<string> ConnectAsync(ulong address)
         {
+            int n = System.Threading.Interlocked.Increment(ref _round);
+            var clk = System.Diagnostics.Stopwatch.StartNew();
             if (System.Threading.Interlocked.Exchange(ref _busy, 1) == 1)
+            {
+                DebugLog.Event("round", "n=" + n + " skipped:busy");
                 return "正在连接中";
+            }
+            var facts = new StringBuilder(192);
+            facts.Append("n=").Append(n);
             try
             {
-                DisposeDevice();
+                facts.Append(" entryConn=").Append(IsConnected ? '1' : '0');
+                facts.Append(" radio=").Append(await DebugLog.ProbeRadioAsync().ConfigureAwait(false));
+                facts.Append(" reg=").Append(DebugLog.ProbePairedInRegistry(address));
 
-                BluetoothLEDevice dev;
-                try
+                string r = await ConnectCoreAsync(address, facts).ConfigureAwait(false);
+                facts.Append(" => ").Append(r == null ? "OK" : "FAIL/" + (_lastErrorCode ?? "?"));
+                facts.Append(" total=").Append(clk.ElapsedMilliseconds).Append("ms");
+                DebugLog.Event("round", facts.ToString());
+                if (r != null)
                 {
-                    dev = await BluetoothLEDevice.FromBluetoothAddressAsync(address).AsTask().ConfigureAwait(false);
+                    // 半失败必须净身出户：_device 挂着活链会让 IsConnected 恒真，
+                    // tick 在「if (_ble.IsConnected) return;」就返回，重连循环脑死亡
+                    // （2026-10-06 场景 1 实锤：char=AccessDenied 失败后 66 秒零尝试）。
+                    DisposeDevice();
                 }
-                catch (Exception e)
-                {
-                    return Fail("device_not_found", "创建设备对象失败：" + e.Message);
-                }
-                if (dev == null) return Fail("device_not_found", "找不到该地址的设备（可能未配对或已断电）");
-
-                _device = dev;
-                dev.ConnectionStatusChanged += OnConnectionStatusChanged;
-
-                // FromBluetoothAddressAsync 返回对象不代表链路已建立，要等 ConnectionStatus
-                if (dev.ConnectionStatus != BluetoothConnectionStatus.Connected)
-                {
-                    var tcs = new TaskCompletionSource<bool>();
-                    TypedEventHandler<BluetoothLEDevice, object> h = (s, e) =>
-                    {
-                        if (s.ConnectionStatus == BluetoothConnectionStatus.Connected) tcs.TrySetResult(true);
-                    };
-                    dev.ConnectionStatusChanged += h;
-                    var timeout = Task.Delay(10000);
-                    var done = await Task.WhenAny(tcs.Task, timeout).ConfigureAwait(false);
-                    dev.ConnectionStatusChanged -= h;
-                    if (done == timeout) return ConnFail("等待连接超时（10 秒）");
-                }
-
-                var svcResult = await dev.GetGattServicesAsync(BluetoothCacheMode.Uncached).AsTask().ConfigureAwait(false);
-                if (svcResult.Status != GattCommunicationStatus.Success)
-                    return ConnFail("枚举服务失败：" + svcResult.Status, svcResult.Status);
-
-                return await OpenAtvvAsync(dev, svcResult.Services).ConfigureAwait(false);
+                return r;
+            }
+            catch (Exception e)
+            {
+                facts.Append(" => CRASH/").Append(e.GetType().Name);
+                facts.Append(" total=").Append(clk.ElapsedMilliseconds).Append("ms");
+                DebugLog.Event("round", facts.ToString());
+                DisposeDevice();   // 异常路径同样不留活链（理由同上）
+                throw;
             }
             finally
             {
@@ -150,14 +149,77 @@ namespace DshRemoteMic
             }
         }
 
+        private static int _round;
+
+        private async Task<string> ConnectCoreAsync(ulong address, StringBuilder facts)
+        {
+            DisposeDevice();
+
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            BluetoothLEDevice dev;
+            try
+            {
+                dev = await BluetoothLEDevice.FromBluetoothAddressAsync(address).AsTask().ConfigureAwait(false);
+            }
+            catch (Exception e)
+            {
+                facts.Append(" create=throw/").Append(e.GetType().Name)
+                     .Append('(').Append(sw.ElapsedMilliseconds).Append("ms)");
+                return Fail("device_not_found", "创建设备对象失败：" + e.Message);
+            }
+            facts.Append(" create=").Append(dev != null ? "ok" : "null")
+                 .Append('(').Append(sw.ElapsedMilliseconds).Append("ms)");
+            if (dev == null) return Fail("device_not_found", "找不到该地址的设备（可能未配对或已断电）");
+
+            _device = dev;
+            try
+            {
+                facts.Append(" status=").Append(dev.ConnectionStatus);
+                var di = dev.DeviceInformation;
+                facts.Append(" paired=").Append(di != null && di.Pairing != null ? di.Pairing.IsPaired.ToString() : "?");
+                facts.Append(" name=").Append(string.IsNullOrEmpty(dev.Name) ? "-" : dev.Name);
+            }
+            catch { facts.Append(" meta=throw"); }
+            dev.ConnectionStatusChanged += OnConnectionStatusChanged;
+
+            // FromBluetoothAddressAsync 返回对象不代表链路已建立，要等 ConnectionStatus
+            if (dev.ConnectionStatus != BluetoothConnectionStatus.Connected)
+            {
+                var tcs = new TaskCompletionSource<bool>();
+                TypedEventHandler<BluetoothLEDevice, object> h = (s, e) =>
+                {
+                    if (s.ConnectionStatus == BluetoothConnectionStatus.Connected) tcs.TrySetResult(true);
+                };
+                dev.ConnectionStatusChanged += h;
+                var timeout = Task.Delay(10000);
+                sw.Restart();
+                var done = await Task.WhenAny(tcs.Task, timeout).ConfigureAwait(false);
+                dev.ConnectionStatusChanged -= h;
+                facts.Append(" wait=").Append(done == timeout ? "timeout" : "connected")
+                     .Append('(').Append(sw.ElapsedMilliseconds).Append("ms)");
+                if (done == timeout) return ConnFail("等待连接超时（10 秒）");
+            }
+            else facts.Append(" wait=skip(already)");
+
+            sw.Restart();
+            var svcResult = await dev.GetGattServicesAsync(BluetoothCacheMode.Uncached).AsTask().ConfigureAwait(false);
+            facts.Append(" svc=").Append(svcResult.Status)
+                 .Append('(').Append(sw.ElapsedMilliseconds).Append("ms)");
+            if (svcResult.Status != GattCommunicationStatus.Success)
+                return ConnFail("枚举服务失败：" + svcResult.Status, svcResult.Status);
+
+            return await OpenAtvvAsync(dev, svcResult.Services, facts).ConfigureAwait(false);
+        }
+
         /// <summary>枚举服务、取三个特征、订阅 CONTROL 与 AUDIO，顺带读型号与电量。</summary>
-        private async Task<string> OpenAtvvAsync(BluetoothLEDevice dev, IReadOnlyList<GattDeviceService> services)
+        private async Task<string> OpenAtvvAsync(BluetoothLEDevice dev, IReadOnlyList<GattDeviceService> services, StringBuilder facts)
         {
             GattDeviceService svc = null;
             foreach (var s in services)
             {
                 if (s.Uuid == Atvv.Service) { svc = s; break; }
             }
+            facts.Append(" atvv=").Append(svc != null ? "found" : "missing");
             if (svc == null)
             {
                 // 设备连上了但没有 ATVV 服务 —— 要么是别的设备，要么服务缓存没刷新
@@ -166,7 +228,10 @@ namespace DshRemoteMic
                 return Fail("unsupported_device", sb.ToString());
             }
 
+            var sw = System.Diagnostics.Stopwatch.StartNew();
             var charResult = await svc.GetCharacteristicsAsync(BluetoothCacheMode.Uncached).AsTask().ConfigureAwait(false);
+            facts.Append(" char=").Append(charResult.Status)
+                 .Append('(').Append(sw.ElapsedMilliseconds).Append("ms)");
             if (charResult.Status != GattCommunicationStatus.Success)
                 return ConnFail("枚举特征失败：" + charResult.Status, charResult.Status);
 
@@ -181,10 +246,20 @@ namespace DshRemoteMic
                 return Fail("unsupported_device", "ATVV 特征不全（0002/0003/0004 有缺失）");
 
             // 先订阅再让上层握手，避免「预按住键时软件未就绪」漏掉起始音频（AGENTS.md §7 坑 6）
+            sw.Restart();
             var r1 = await SubscribeAsync(_controlChar, OnControlChanged).ConfigureAwait(false);
-            if (r1 != null) return r1;
+            if (r1 != null)
+            {
+                facts.Append(" sub=fail/control(").Append(sw.ElapsedMilliseconds).Append("ms)");
+                return r1;
+            }
             var r2 = await SubscribeAsync(_audioChar, OnAudioChanged).ConfigureAwait(false);
-            if (r2 != null) return r2;
+            if (r2 != null)
+            {
+                facts.Append(" sub=fail/audio(").Append(sw.ElapsedMilliseconds).Append("ms)");
+                return r2;
+            }
+            facts.Append(" sub=ok(").Append(sw.ElapsedMilliseconds).Append("ms)");
 
             // 型号与电量是锦上添花：读失败绝不能把音频链路拖下水
             try { await ReadMetaAsync(services, dev).ConfigureAwait(false); }
@@ -404,6 +479,8 @@ namespace DshRemoteMic
         private void OnConnectionStatusChanged(BluetoothLEDevice sender, object args)
         {
             bool connected = sender.ConnectionStatus == BluetoothConnectionStatus.Connected;
+            // 原始链路事件全量落盘：关蓝牙时 WinRT 到底发不发事件， absence 本身就是证据
+            DebugLog.Event("link", "ConnectionStatusChanged -> " + sender.ConnectionStatus);
             RaiseConnectionChanged(connected);
             if (!connected)
             {

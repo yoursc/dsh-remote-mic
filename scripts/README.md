@@ -20,6 +20,9 @@
 |---|---|---|
 | [`check-doc-links.mjs`](./check-doc-links.mjs) | 扫全仓 markdown 的**相对链接**报断链；已知但按约定暂不修的列在脚本内 `KNOWN_BROKEN`（带原因与日期，修好后脚本会反过来提醒删条目） | `node scripts/check-doc-links.mjs`（有问题退出码 1）；`--all` 连已知项一起列 |
 
+> 图表不归本目录管 —— 仓库里的图一律用 **draw.io 官方导出**（GUI 或 Desktop CLI），
+> 用法见 [`docs/README.md`](../docs/README.md) 的图表约定。
+
 ## 约定
 
 - Node ESM（`node ≥ 20`）、**零第三方依赖** —— clone 下来直接能跑。
