@@ -7,7 +7,7 @@
 | 文档 | 是什么 | 什么时候读 |
 |---|---|---|
 | [`PROTOCOL.md`](./PROTOCOL.md) | 线缆协议（proto 1，**已冻结**）——**唯一真源** | 碰 local-mic ↔ 客户端通信时 |
-| [`STATE-MODEL.md`](./STATE-MODEL.md) | **状态模型**：判定层 8 态（定义/判据/优先级/转移/两本账）+ 判定态→协议的映射表 | 改状态判定、写 UI 提示、动 `error.code` 时 |
+| [`STATE-MODEL.md`](./STATE-MODEL.md) | **状态模型**：判定层 7 态（定义/判据/优先级/转移/两本账）+ 判定态→协议的映射表 | 改状态判定、写 UI 提示、动 `error.code` 时 |
 | [`HARDWARE.md`](./HARDWARE.md) | RC003 硬件、ATVV 协议规格、键位真值表（local-mic 端手册） | 改 local-mic / 碰硬件时 |
 | [`DSH-SEAMS.md`](./DSH-SEAMS.md) | dsh 平台接入点与实证 API（插件端手册；含 §7.9「插件改动前置清单」） | 写插件时 |
 | [`PITFALLS.md`](./PITFALLS.md) | 真机坑全量：时序、日志证据、排查过程、本机环境 | 踩坑 / 调试时 |

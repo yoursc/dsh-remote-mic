@@ -84,8 +84,8 @@ draw.io 打开 → **File → Export as → SVG** → 勾 *Include a copy of my 
 
 | 文件 | 内容 | 被谁引用 |
 |---|---|---|
-| [`architecture-layers.drawio.svg`](./architecture-layers.drawio.svg) | 两层真相源 + 一个渲染器（判定层 → 协议层 / 桌面 UI → 插件 UI） | [`STATE-MODEL.md`](../STATE-MODEL.md) §1 |
-| [`state-model.drawio.svg`](./state-model.drawio.svg) | 判定层八态转移图（前提层 4 态 + 链路层 4 态） | [`STATE-MODEL.md`](../STATE-MODEL.md) §3.2 |
+| [`architecture-layers.drawio.svg`](./architecture-layers.drawio.svg) | 两层真相源 + 一个渲染器（判定层 → 协议层 / 桌面 UI → 插件 UI） | 内容对应 [`STATE-MODEL.md`](../STATE-MODEL.md) §1（⚠ 该文档尚未嵌入图片引用） |
+| [`state-model.drawio.svg`](./state-model.drawio.svg) | 判定层转移图（前提层 4 态 + 链路层 4 态）—— ⚠ **图仍是收束前的八态（`Reconnecting` 已合并但未从图中删除），待按七态重画** | [`DEV.md`](../../DEV.md) 待办 0.1（⚠ 设计文档尚未嵌入图片引用） |
 
 新增图请**同时更新本清单**（一行：内容 + 被谁引用），方便别人找。
 

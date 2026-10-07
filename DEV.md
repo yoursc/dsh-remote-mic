@@ -199,7 +199,8 @@
 
 5. **判定层（local-mic 侧）—— 设计已收束（2026-10-06 命名定案），代码尚未写**
    规格全部 [`docs/STATE-MODEL.md`](./docs/STATE-MODEL.md)，实现时按这里照做，别自己发挥：
-   - **状态命名（2026-10-06 用户定，STATE-MODEL §2.1 有对照表），八态**：
+   - **状态命名（2026-10-06 用户定，STATE-MODEL §2.1 有对照表），七态**
+     （2026-10-07 收束：`Connecting` 合并了 `Reconnecting`，八态 → 七态）：
      前提层 **`BLE_NotExist` / `BLE_Off` / `DeviceNotSelected` / `BLE_Unpaired`**，
      链路层 **`Connecting` / `Unresponsive` / `Connected`**。`Connecting` 覆盖入口连接与断连后的重试。
      （命名演变：`NoDevice`→`DeviceNotSelected`；`NotPaired`→`PairLost`→**`BLE_Unpaired`**；
@@ -235,9 +236,13 @@
 - 状态模型定稿后，按设计实现 local-mic 判定层；当前代码与设计存在已知脱节，至少包括：代码仍是协议四态、仍可能自动选设备、仍读取 `IsPaired`、fd/gd 两本账未实现、Radio / DeviceWatcher 尚未接入生产判定层、`Connecting` 入口态尚未实现。
 - 上述代码脱节在状态模型定稿前只登记，不做局部修补，避免实现中间设计后返工。
 
-### 待办 0.1 · ✅ 已完成（2026-10-06）：状态图更新为八态
+### 待办 0.1 · ⚠ 部分过时（2026-10-06 完成，2026-10-07 收束后待重画）
 
-- [`docs/drawio/state-model.drawio.svg`](./docs/drawio/state-model.drawio.svg) 已按八态模型重画并用 draw.io Desktop CLI 官方导出（`-x -f svg -e -t -u`，含内嵌图源 / 严格转义 / 明暗自适应）；[`docs/drawio/README.md`](./docs/drawio/README.md) 的文件清单已同步为八态。
+- [`docs/drawio/state-model.drawio.svg`](./docs/drawio/state-model.drawio.svg) 已于 2026-10-06 按**当时**的八态模型重画并用 draw.io Desktop CLI 官方导出（`-x -f svg -e -t -u`，含内嵌图源 / 严格转义 / 明暗自适应）；[`docs/drawio/README.md`](./docs/drawio/README.md) 的文件清单已同步。
+- ⚠ **图已过时**：2026-10-07 状态模型收束为**七态**（`Connecting` 合并 `Reconnecting`），但图中仍画着 `Reconnecting` 节点与连线。
+  ⇒ **待办**：在本机 Windows 用 draw.io（VS Code 插件或 Desktop）删掉 `Reconnecting`、把边并入 `Connecting`，**用官方导出**覆盖同名文件（纪律 18；容器内无 draw.io，且禁止脚本改图），随后更新 [`docs/drawio/README.md`](./docs/drawio/README.md) 清单里该行的"待重画"标注。
+- 📌 **重画完成后一起做**（2026-10-07 用户定）：把两张图**嵌入** [`docs/STATE-MODEL.md`](./docs/STATE-MODEL.md)（`architecture-layers.drawio.svg` → §1，`state-model.drawio.svg` → §3.3 转移表处），
+  并把 [`docs/drawio/README.md`](./docs/drawio/README.md) 清单的"被谁引用"列**改成真实引用**。⛔ **不要提前嵌入**——会把过时的八态图放进规范正文。
 
 ## 待办（2026-10-02 立项，均未开工）
 
