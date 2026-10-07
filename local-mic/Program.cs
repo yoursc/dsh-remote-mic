@@ -151,14 +151,16 @@ namespace DshRemoteMic
                 var adpcm = AdpcmDecoder.RunSelfTest();
                 var session = AtvvSession.RunSelfTest();
                 var vectors = Protocol.RunSelfTest();
+                var state = DeviceStateModel.RunSelfTest();
                 var diag = DiagWeb.SelfTest();          // 内嵌页面资源齐全（漏编译 ⇒ 页面 404，肉眼难查）
                 report = adpcm + Environment.NewLine + session + Environment.NewLine + vectors +
-                         Environment.NewLine + diag;
+                         Environment.NewLine + state + Environment.NewLine + diag;
 
                 int bad = 0;
                 if (adpcm.IndexOf("自检通过", StringComparison.Ordinal) < 0) bad++;
                 if (session.IndexOf("自检通过", StringComparison.Ordinal) < 0) bad++;
                 if (vectors.IndexOf("夹具通过", StringComparison.Ordinal) < 0) bad++;
+                if (state.IndexOf("状态模型自检通过", StringComparison.Ordinal) < 0) bad++;
                 if (diag.IndexOf("自检通过", StringComparison.Ordinal) < 0) bad++;
                 code = bad == 0 ? 0 : 1;
             }

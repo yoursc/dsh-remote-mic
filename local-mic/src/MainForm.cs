@@ -355,7 +355,8 @@ namespace DshRemoteMic
         {
             var info = _localMic.Info;
 
-            _devName.Text = _localMic.DisplayName;
+            bool noDevice = _localMic.ModeState == DeviceState.DeviceNotSelected;
+            _devName.Text = noDevice ? "未选择设备" : _localMic.DisplayName;
 
             if (info != null && info.IsKnown)
             {
@@ -377,11 +378,13 @@ namespace DshRemoteMic
                 _devBadge.BackColor = Color.Transparent;
             }
 
-            _devSub.Text = info != null && info.Subtitle.Length > 0
-                ? info.Subtitle
-                : (info != null ? info.Note : "");
+            _devSub.Text = noDevice ? "请点击“选择遥控器”进行配置"
+                : (info != null && info.Subtitle.Length > 0
+                    ? info.Subtitle
+                    : (info != null ? info.Note : ""));
 
-            _devMac.Text = _localMic.DeviceMac + (info != null && !info.IsKnown ? "　（" + info.Note + "）" : "");
+            _devMac.Text = noDevice ? ""
+                : _localMic.DeviceMac + (info != null && !info.IsKnown ? "　（" + info.Note + "）" : "");
 
             // 电量：断开时保留上次读数但灰显，避免把过期数字当成实时值
             int bat = _localMic.Battery;
@@ -402,8 +405,7 @@ namespace DshRemoteMic
                 _batteryText.ForeColor = bat <= LocalMic.LowBatteryThreshold ? Color.FromArgb(0xE2, 0x4B, 0x4A) : CText;
             }
 
-            _statusLine.Text = "状态：" + NameOf(_localMic.State) + "　·　" + _localMic.Detail +
-                               (_localMic.IsPaired ? "　·　已配对" : "");
+            _statusLine.Text = "状态机：" + NameOfModel(_localMic.ModeState);
             _wsLine.Text = "WebSocket ws://127.0.0.1:" + _localMic.Port + "　浏览器在线：" + _localMic.ClientCount;
 
             bool busy = _testing;
@@ -411,14 +413,18 @@ namespace DshRemoteMic
             _btnTestAudio.Enabled = !busy;
         }
 
-        private static string NameOf(string state)
+        private static string NameOfModel(DeviceState state)
         {
             switch (state)
             {
-                case "connected": return "已连接";
-                case "connecting": return "连接中";
-                case "error": return "错误";
-                default: return "未连接";
+                case DeviceState.BLE_NotExist: return "无蓝牙适配器";
+                case DeviceState.BLE_Off: return "蓝牙关闭";
+                case DeviceState.DeviceNotSelected: return "未选择设备";
+                case DeviceState.BLE_Unpaired: return "未配对";
+                case DeviceState.Connecting: return "连接中";
+                case DeviceState.Unresponsive: return "连接失败";
+                case DeviceState.Connected: return "连接成功";
+                default: return "未知";
             }
         }
 
@@ -430,6 +436,23 @@ namespace DshRemoteMic
         {
             var menu = new ContextMenuStrip();
             var list = DeviceFinder.EnumeratePaired();
+
+            var clear = new ToolStripMenuItem("（不选择设备）")
+            {
+                Checked = _localMic.ModeState == DeviceState.DeviceNotSelected
+            };
+            clear.Click += (s2, e2) =>
+            {
+                _localMic.SetAddress(0, "");
+                _wave.Clear();
+                _wavBytes = null;
+                _valDuration.Text = _valFrames.Text = _valRate.Text = "—";
+                _btnPlay.Enabled = _btnSave.Enabled = false;
+                RefreshAll();
+            };
+            menu.Items.Add(clear);
+            menu.Items.Add(new ToolStripSeparator());
+
             if (list.Count == 0)
             {
                 menu.Items.Add(new ToolStripMenuItem("（没有已配对的蓝牙设备）") { Enabled = false });

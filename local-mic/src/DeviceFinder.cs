@@ -71,7 +71,28 @@ namespace DshRemoteMic
             return list;
         }
 
-        /// <summary>优先挑名字像遥控器的那台；挑不到就返回第一台。</summary>
+        /// <summary>判断注册表中是否仍有指定蓝牙地址；这是 BLE_Unpaired 的主判据。</summary>
+        public static bool IsPaired(ulong address)
+        {
+            if (address == 0) return false;
+            string hex = address.ToString("X12", CultureInfo.InvariantCulture);
+            foreach (var bus in new[] { @"SYSTEM\CurrentControlSet\Enum\BTHLE", @"SYSTEM\CurrentControlSet\Enum\BTHENUM" })
+            {
+                try
+                {
+                    using (var root = Registry.LocalMachine.OpenSubKey(bus))
+                    {
+                        if (root == null) continue;
+                        foreach (var sub in root.GetSubKeyNames())
+                            if (sub.StartsWith("Dev_" + hex, StringComparison.OrdinalIgnoreCase)) return true;
+                    }
+                }
+                catch { }
+            }
+            return false;
+        }
+
+        /// <summary>旧版自动选择入口；状态模型不再调用它。</summary>
         public static FoundDevice FindRemote()
         {
             var all = EnumeratePaired();

@@ -31,6 +31,9 @@ namespace DshRemoteMic
         /// 英文系统正确、中文系统失效。这里在失败点就地记下结构化结论。
         /// </summary>
         public string LastErrorCode { get { return _lastErrorCode; } }
+        // 上一轮连接走到哪一步，供判定层区分 fd（链路失败）与 gd（GATT 失败）。
+        public bool LastAttemptLinkEstablished { get; private set; }
+        public bool LastAttemptGattFailed { get; private set; }
 
         /// <summary>记录结构化错误码并返回给调用方看的诊断文本。</summary>
         private string Fail(string code, string message)
@@ -108,6 +111,8 @@ namespace DshRemoteMic
         public async Task<string> ConnectAsync(ulong address)
         {
             int n = System.Threading.Interlocked.Increment(ref _round);
+            LastAttemptLinkEstablished = false;
+            LastAttemptGattFailed = false;
             var clk = System.Diagnostics.Stopwatch.StartNew();
             if (System.Threading.Interlocked.Exchange(ref _busy, 1) == 1)
             {
@@ -201,6 +206,7 @@ namespace DshRemoteMic
             }
             else facts.Append(" wait=skip(already)");
 
+            LastAttemptLinkEstablished = true;
             sw.Restart();
             var svcResult = await dev.GetGattServicesAsync(BluetoothCacheMode.Uncached).AsTask().ConfigureAwait(false);
             facts.Append(" svc=").Append(svcResult.Status)
@@ -387,22 +393,23 @@ namespace DshRemoteMic
             }
             catch (Exception e)
             {
-                // ATT 0x05（链路未加密）在 WinRT 上表现为 AccessDenied，
-                // 而它的异常消息是本地化的 —— 所以这里只看配对状态这个结构化事实。
+                // ATT 0x05（链路未加密）在 WinRT 上表现为 AccessDenied；
+                // 这里不据此判配对，交给上层状态模型按注册表事实决定。
                 return ConnFail("订阅 " + Short(c.Uuid) + " 异常：" + e.Message);
             }
         }
 
-        /// <summary>连接期失败的判定：未配对是根因，其次才是超时。</summary>
+        /// <summary>连接期 GATT 失败统一记为 connect_timeout；配对状态由判定层查注册表决定。</summary>
         private string ConnFail(string message)
         {
-            return Fail(!IsPaired ? "pairing_required" : "connect_timeout", message);
+            if (LastAttemptLinkEstablished) LastAttemptGattFailed = true;
+            return Fail("connect_timeout", message);
         }
 
         private string ConnFail(string message, GattCommunicationStatus status)
         {
-            bool auth = status == GattCommunicationStatus.AccessDenied || !IsPaired;
-            return Fail(auth ? "pairing_required" : "connect_timeout", message);
+            if (LastAttemptLinkEstablished) LastAttemptGattFailed = true;
+            return Fail("connect_timeout", message);
         }
 
         private static string Short(Guid g)

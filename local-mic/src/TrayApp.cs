@@ -49,7 +49,7 @@ namespace DshRemoteMic
                 Visible = true,
                 ContextMenuStrip = _menu,
             };
-            _icon.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left) ShowBalloon(); };
+            // 左键双击打开主窗口；单击不再显示通知气泡。
             _icon.DoubleClick += (s, e) => ShowMain();
 
             // 任务栏重建时图标必须重新注册：explorer 崩溃重启、或我们开机自启时抢在 explorer 前面
@@ -144,16 +144,6 @@ namespace DshRemoteMic
                 _icon.BalloonTipText = "当前 " + level + "%，建议充电。电量耗尽时按语音键会完全没反应。";
                 _icon.ShowBalloonTip(6000);
             });
-        }
-
-        private void ShowBalloon()
-        {
-            _icon.BalloonTipTitle = "DSH 遥控麦克风 local-mic";
-            _icon.BalloonTipText = "状态：" + NameOf(_localMic.State) + "（" + _localMic.Detail + "）\n" +
-                                   "设备：" + _localMic.DisplayName +
-                                   (_localMic.Battery >= 0 ? "　电量 " + _localMic.Battery + "%" : "") +
-                                   "\n双击图标打开主窗口";
-            _icon.ShowBalloonTip(4000);
         }
 
         private void SafeRefresh()

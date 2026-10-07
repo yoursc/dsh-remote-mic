@@ -8,6 +8,7 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using Windows.Devices.Radios;
 
 namespace DshRemoteMic
 {
@@ -37,8 +38,22 @@ namespace DshRemoteMic
         private string _deviceName = "";
         private string _state = "disconnected";
         private string _detail = "未启动";
+        private DeviceState _deviceState = DeviceState.DeviceNotSelected;
         private bool _lowNotified;
+        // 状态模型记忆位：Connecting 合并了入口连接与断连重试，来源留在内部而非协议中。
+        private ConnectionAttemptKind _attemptKind = ConnectionAttemptKind.Entry;
+        private DateTime _attemptStartedUtc;
+        private int _linkFailures;
+        private bool _gattOpening;
+        private DateTime _gattStartedUtc;
+        private bool? _radioAvailable;
+        private bool? _radioOn;
+        // 必须保强引用，否则 StateChanged 会静默失效。
+        private readonly List<Radio> _radios = new List<Radio>();
         private readonly SemaphoreSlim _connectGate = new SemaphoreSlim(1, 1);
+        private readonly object _connectionEpochLock = new object();
+        private CancellationTokenSource _connectionCts = new CancellationTokenSource();
+        private int _connectionGeneration;
 
         // 自检独占：自检期间会话机让位，由自检自己解释 CONTROL 字节。
         // volatile：BLE 通知线程与 UI 线程都会读它。
@@ -65,8 +80,9 @@ namespace DshRemoteMic
 
         public string State { get { return _state; } }
         public string Detail { get { return _detail; } }
+        public DeviceState ModeState { get { return _deviceState; } }
         public bool IsConnected { get { return _ble.IsConnected; } }
-        public bool IsPaired { get { return _ble.IsPaired; } }
+        public bool IsPaired { get { return _address != 0 && DeviceFinder.IsPaired(_address); } }
         public int ClientCount { get { return _ws != null ? _ws.ClientCount : 0; } }
         /// <summary>实际在监听的端口（改端口失败时它仍是旧的那个，不是用户填的那个）。</summary>
         public int Port { get { return _port; } }
@@ -117,12 +133,9 @@ namespace DshRemoteMic
 
         public void Start()
         {
+            // 状态模型不替用户选择设备：地址为 0 就保持 DeviceNotSelected，
+            // 不扫描、不自动接管系统里的第一台蓝牙设备。
             _address = Config.Address;
-            if (_address == 0)
-            {
-                var found = DeviceFinder.FindRemote();
-                if (found != null) { _address = found.Address; _deviceName = found.Name; }
-            }
 
             _port = Config.Port;
             try
@@ -146,14 +159,13 @@ namespace DshRemoteMic
             _ble.ConnectionChanged += OnConnectionChanged;
             _ble.DeviceInfoReady += OnDeviceInfo;
             _ble.BatteryChanged += OnBattery;
+            StartRadioWatch();
 
             // 有浏览器在线时积极重连（5s）；否则 30s 探一次，只为让托盘状态保持真实
             _timer = new Timer(Tick, null, 1500, 5000);
 
             if (_address == 0)
-                // retryable=true：local-mic 会一直重试，遥控器开了就能自愈。
-                // 客户端据此「安静等待」，而不是弹一个吓人的错误框（§9.2）。
-                SetError("device_not_found", true, "未找到遥控器，请先在 Windows 里配对");
+                ApplyModelState();
             else
             {
                 SetState("disconnected", "等待连接 " + DeviceMac);
@@ -161,6 +173,64 @@ namespace DshRemoteMic
                 // 开机自启的用户会盯着一个灰色图标怀疑它坏了。
                 Task.Run(() => EnsureConnectedAsync());
             }
+        }
+
+        private async void StartRadioWatch()
+        {
+            try
+            {
+                var radios = await Radio.GetRadiosAsync().AsTask().ConfigureAwait(false);
+                lock (_radios)
+                {
+                    _radios.Clear();
+                    foreach (var radio in radios)
+                    {
+                        if (radio.Kind != RadioKind.Bluetooth) continue;
+                        _radios.Add(radio);
+                        radio.StateChanged += OnRadioStateChanged;
+                    }
+                }
+                UpdateRadioFacts(radios);
+            }
+            catch
+            {
+                // 探测失败按蓝牙正常乐观兜底，避免把探测故障伪装成 BLE_Off。
+                _radioAvailable = null;
+                _radioOn = null;
+            }
+            ApplyModelState();
+        }
+
+        private async Task RefreshRadioFactsAsync()
+        {
+            try
+            {
+                var radios = await Radio.GetRadiosAsync().AsTask().ConfigureAwait(false);
+                UpdateRadioFacts(radios);
+                ApplyModelState();
+            }
+            catch { }
+        }
+
+        private void OnRadioStateChanged(Radio sender, object args)
+        {
+            _radioOn = sender.State == RadioState.On;
+            ApplyModelState();
+            if (_radioOn == true && _address != 0) Task.Run(() => EnsureConnectedAsync());
+        }
+
+        private void UpdateRadioFacts(IReadOnlyList<Radio> radios)
+        {
+            bool found = false;
+            bool on = false;
+            foreach (var radio in radios)
+            {
+                if (radio.Kind != RadioKind.Bluetooth) continue;
+                found = true;
+                if (radio.State == RadioState.On) on = true;
+            }
+            _radioAvailable = found;
+            _radioOn = found && on;
         }
 
         private void Raise(Action<byte[]> h, byte[] b)
@@ -343,6 +413,11 @@ namespace DshRemoteMic
                 var name = _ble.DeviceName;
                 if (!string.IsNullOrEmpty(name)) _deviceName = name;
                 ClearError();
+                _deviceState = DeviceState.Connected;
+                _linkFailures = 0;
+                _gattOpening = false;
+                _gattStartedUtc = default(DateTime);
+                _attemptStartedUtc = default(DateTime);
                 SetState("connected", "已连接");
                 // proto 1：连接状态变化发 device，不是 ready
                 // （ready 只回答「协议能力」，且只在 hello 校验通过时发一次）
@@ -354,7 +429,9 @@ namespace DshRemoteMic
                 // 进行中的采集必须按 disconnected 收尾，否则客户端会拿半截音频去转写
                 _session.Abort("disconnected");
                 _session.Disarm();
-                SetState("disconnected", "设备断开");
+                _attemptKind = ConnectionAttemptKind.Retry;
+                _attemptStartedUtc = DateTime.UtcNow;
+                ApplyModelState();
             }
         }
 
@@ -495,6 +572,7 @@ namespace DshRemoteMic
             if (Interlocked.Exchange(ref _working, 1) == 1) return;
             try
             {
+                _ = RefreshRadioFactsAsync();
                 // ⚠ 这个分支若恒为 true（半失败后 _device 还挂着 Connected 链路），
                 // 重连循环会表现得"彻底死了" —— 落盘就是为了把这种静默卡死钉出来
                 if (_ble.IsConnected) { TickNote("skip:IsConnected=true"); return; }
@@ -524,14 +602,24 @@ namespace DshRemoteMic
             // 串行化：定时器、浏览器上线、启动踢一脚、用户点自检 —— 这些都可能同时触发连接。
             // 以前这里直接靠 BleRemote 的 _busy 挡，后来者会拿到「正在连接中」当成失败返回，
             // 于是自检在启动瞬间点就会莫名其妙地失败。现在让后来者排队，而不是报错。
-            DebugLog.Event("conn", "gate wait");
-            await _connectGate.WaitAsync().ConfigureAwait(false);
-            DebugLog.Event("conn", "gate ok");
+            int generation;
+            CancellationToken connectionToken;
+            lock (_connectionEpochLock)
+            {
+                generation = _connectionGeneration;
+                connectionToken = _connectionCts.Token;
+            }
+            DebugLog.Event("conn", "gate wait gen=" + generation);
+            await _connectGate.WaitAsync(connectionToken).ConfigureAwait(false);
+            DebugLog.Event("conn", "gate ok gen=" + generation);
             try
             {
+                connectionToken.ThrowIfCancellationRequested();
+                if (generation != _connectionGeneration) return "连接已取消";
                 if (_ble.IsConnected) return null;   // 排队期间别人已经连上了
 
-                SetState("connecting", "连接 " + DeviceMac);
+                if (_attemptStartedUtc == default(DateTime)) _attemptStartedUtc = DateTime.UtcNow;
+                ApplyModelState();
                 string err;
                 try
                 {
@@ -541,6 +629,11 @@ namespace DshRemoteMic
                 {
                     err = e.Message;
                 }
+                if (generation != _connectionGeneration || connectionToken.IsCancellationRequested)
+                {
+                    DebugLog.Event("conn", "discard stale generation=" + generation);
+                    return "连接已取消";
+                }
                 if (err != null)
                 {
                     // 并发踢了一脚，不是故障，别报成错误
@@ -548,10 +641,21 @@ namespace DshRemoteMic
 
                     // ⚠ 错误码由 BleRemote 在失败点结构化记下，这里【不解析消息文本】——
                     // WinRT 异常消息是本地化的，靠字符串包含判定在中文系统上会失效。
+                    if (_ble.LastAttemptGattFailed)
+                    {
+                        if (!_gattOpening) _gattStartedUtc = DateTime.UtcNow;
+                        _gattOpening = true;
+                    }
+                    else
+                    {
+                        _gattOpening = false;
+                        _gattStartedUtc = default(DateTime);
+                        _linkFailures++;
+                    }
                     var code = _ble.LastErrorCode;
                     if (string.IsNullOrEmpty(code)) code = "connect_timeout";
+                    ApplyModelState();
                     DebugLog.Event("conn", "fail code=" + code + " retryable=" + IsRetryable(code) + " msg=" + err);
-                    SetError(code, IsRetryable(code), err);
                     return err;
                 }
                 DebugLog.Event("conn", "ok");
@@ -568,6 +672,20 @@ namespace DshRemoteMic
 
         public void SetAddress(ulong address, string name)
         {
+            CancellationTokenSource oldCts;
+            lock (_connectionEpochLock)
+            {
+                _connectionGeneration++;
+                oldCts = _connectionCts;
+                _connectionCts = new CancellationTokenSource();
+            }
+            try { oldCts.Cancel(); } catch { }
+
+            // 先结束业务采集，再释放 GATT 对象；MicClose 只尽力发送，不能阻塞取消。
+            _session.Abort("device_changed");
+            _session.Disarm();
+            _ble.Disconnect();
+
             _address = address;
             _deviceName = name;
             Config.Address = address;
@@ -582,8 +700,51 @@ namespace DshRemoteMic
             // 客户端手里不能留着上一台的旧值。
             BroadcastDevice();
 
-            _ble.Disconnect();
-            var ignored = Task.Run(() => EnsureConnectedAsync());
+            ApplyModelState();
+            if (address != 0)
+            {
+                var ignored = Task.Run(() => EnsureConnectedAsync());
+            }
+        }
+
+        private void ApplyModelState()
+        {
+            var facts = new StateFacts
+            {
+                HasAddress = _address != 0,
+                // 监听或轮询失败时保持 null；判定层按设计对探测未知乐观兜底。
+                BluetoothRadioAvailable = _radioAvailable,
+                BluetoothRadioOn = _radioOn,
+                RegistryPaired = _address != 0 && DeviceFinder.IsPaired(_address),
+                LinkConnected = _ble.IsConnected,
+                GattOpening = _gattOpening,
+                GattStartedUtc = _gattStartedUtc,
+                AttemptKind = _attemptKind,
+                AttemptStartedUtc = _attemptStartedUtc,
+                LinkFailures = _linkFailures
+            };
+            var state = DeviceStateModel.Decide(facts, DateTime.UtcNow);
+            _deviceState = state;
+            var protocol = DeviceStateModel.ProtocolState(state);
+            var code = DeviceStateModel.ErrorCode(state);
+            if (protocol == "error" && code != null)
+                SetError(code, DeviceStateModel.Retryable(state), StateDetail(state));
+            else
+                SetState(protocol, StateDetail(state));
+        }
+
+        private static string StateDetail(DeviceState state)
+        {
+            switch (state)
+            {
+                case DeviceState.BLE_NotExist: return "未检测到蓝牙适配器";
+                case DeviceState.BLE_Off: return "本机蓝牙未开启";
+                case DeviceState.DeviceNotSelected: return "未选择遥控器";
+                case DeviceState.BLE_Unpaired: return "遥控器未配对";
+                case DeviceState.Connecting: return "连接中";
+                case DeviceState.Unresponsive: return "连接失败，请按一下遥控器任意键";
+                default: return "已连接";
+            }
         }
 
         /// <summary>
@@ -599,7 +760,16 @@ namespace DshRemoteMic
             _detail = detail ?? "";
 
             var h = StateChanged;      // 本地 UI 始终更新，它不受抑制约束
-            if (h != null) h(state, _detail);
+            if (h != null)
+            {
+                try { h(state, _detail); }
+                catch (Exception e)
+                {
+                    // 状态判定/协议广播不能被桌面 UI 初始化时序拖死。
+                    // Radio 监听在后台线程启动，托盘控件可能尚未创建。
+                    DebugLog.Event("state-ui", "状态 UI 更新失败：" + e.GetType().Name + " " + e.Message);
+                }
+            }
 
             var key = state + "\n" + _detail;
             if (key == _broadcastStateKey) return;
@@ -643,7 +813,7 @@ namespace DshRemoteMic
             var info = Info;
             return MiniJson.Device(DeviceMac, DisplayName,
                                    info != null ? (info.Model ?? "") : "",
-                                   _ble.IsPaired, Battery);
+                                   _address != 0 && DeviceFinder.IsPaired(_address), Battery);
         }
 
         private void BroadcastDevice()
@@ -699,8 +869,22 @@ namespace DshRemoteMic
             }
 
             progress("连接遥控器…");
-            var err = await EnsureConnectedAsync().ConfigureAwait(false);
-            if (err != null) { r.Message = err; return r; }
+            // 测试入口等待状态机完成连接；单轮 gd AccessDenied 是中间态，不能直接
+            // 把它报告成测试失败。后台重试仍由同一个 EnsureConnectedAsync 串行化。
+            var connectDeadline = DateTime.UtcNow.AddSeconds(75);
+            string lastConnectError = null;
+            while (!_ble.IsConnected && DateTime.UtcNow < connectDeadline)
+            {
+                lastConnectError = await EnsureConnectedAsync().ConfigureAwait(false);
+                if (_ble.IsConnected) break;
+                progress("连接仍在进行…" + (string.IsNullOrEmpty(lastConnectError) ? "" : "（设备正在初始化）"));
+                await Task.Delay(1000).ConfigureAwait(false);
+            }
+            if (!_ble.IsConnected)
+            {
+                r.Message = string.IsNullOrEmpty(lastConnectError) ? "连接超时" : lastConnectError;
+                return r;
+            }
 
             var capsTcs = new TaskCompletionSource<Caps>();
             var startTcs = new TaskCompletionSource<byte>();
@@ -919,6 +1103,17 @@ namespace DshRemoteMic
 
         public void Dispose()
         {
+            lock (_connectionEpochLock)
+            {
+                _connectionGeneration++;
+                try { _connectionCts.Cancel(); } catch { }
+            }
+
+            // 应用退出也走业务会话收尾，避免录音计时器、迟到音频和连接任务继续运行。
+            try { _session.Abort("shutdown"); } catch { }
+            try { _session.Disarm(); } catch { }
+            try { _ble.Disconnect(); } catch { }
+
             if (_timer != null) { _timer.Dispose(); _timer = null; }
             if (_ws != null) { _ws.Dispose(); _ws = null; }
             _ble.Dispose();
